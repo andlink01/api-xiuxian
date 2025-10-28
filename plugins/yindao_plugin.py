@@ -93,20 +93,35 @@ async def _check_yindao_status():
     auto_enabled = config.get("yindao.auto_enabled", False)
     if not auto_enabled: logger.info("【自动引道】已被禁用，跳过检查。"); return
 
-    char_status = None; my_id = context.telegram_client._my_id
+    char_status = None; sect_info = None; my_id = context.telegram_client._my_id
     if not my_id: logger.warning("【自动引道】无法获取助手 User ID，跳过本次检查。"); return
 
     try:
-        logger.info("【自动引道】正在通过 DataManager 获取角色状态缓存...")
+        logger.info("【自动引道】正在通过 DataManager 获取角色状态和宗门缓存...")
+        # 同时获取两种缓存
         char_status = await data_manager.get_character_status(my_id, use_cache=True)
-        if not char_status: logger.warning("【自动引道】无法从 DataManager 获取角色状态缓存，跳过本次检查。"); return
-        logger.info("【自动引道】角色状态缓存获取成功。")
-    except Exception as e: logger.error(f"【自动引道】通过 DataManager 获取角色状态时发生未知错误: {e}", exc_info=True); return
+        sect_info = await data_manager.get_sect_info(my_id, use_cache=True) # <-- 改为读取 sect_info
 
-    sect_name = char_status.get("sect_name")
+        # --- 新增日志 ---
+        logger.info(f"【自动引道】获取到的 char_status 数据: {char_status}")
+        logger.info(f"【自动引道】获取到的 sect_info 数据: {sect_info}") # <-- 添加 sect_info 日志
+        # --- 新增结束 ---
+
+        if not char_status: logger.warning("【自动引道】无法从 DataManager 获取角色状态缓存，跳过本次检查。"); return
+        if not sect_info: logger.warning("【自动引道】无法从 DataManager 获取宗门信息缓存，跳过本次检查。"); return # <-- 检查 sect_info
+
+        logger.info("【自动引道】角色状态和宗门缓存获取成功。")
+    except Exception as e: logger.error(f"【自动引道】通过 DataManager 获取缓存时发生未知错误: {e}", exc_info=True); return
+
+    # --- 修改: 从 sect_info 获取宗门名称 ---
+    sect_name = sect_info.get("sect_name") if isinstance(sect_info, dict) else None
+    # --- 修改结束 ---
+
     if sect_name != YINDAO_SECT_NAME: logger.info(f"【自动引道】角色宗门为 '{sect_name}' (不是 {YINDAO_SECT_NAME})，跳过检查。"); return
 
+    # --- 继续从 char_status 获取引道冷却时间 ---
     last_yindao_str = char_status.get("last_yindao_time"); logger.info(f"【自动引道】获取到上次引道时间: {last_yindao_str}")
+    # --- 获取结束 ---
 
     now_utc = datetime.now(pytz.utc); can_execute = False; next_run_time_utc = None
     interval_seconds = YINDAO_INTERVAL_HOURS * 3600; random_buffer = random.uniform(5, 60)
@@ -118,7 +133,9 @@ async def _check_yindao_status():
         last_yindao_dt_utc = parse_iso_datetime(last_yindao_str)
         if last_yindao_dt_utc:
             next_available_time_utc = last_yindao_dt_utc + timedelta(seconds=interval_seconds + random_buffer)
+            # --- 修改: 从 char_status 获取格式化时间 ---
             last_yindao_formatted = char_status.get("last_yindao_time_formatted", format_local_time(last_yindao_dt_utc))
+            # --- 修改结束 ---
             logger.info(f"【自动引道】上次引道时间: {last_yindao_formatted}, 计算下次可执行时间 (含随机延迟): {format_local_time(next_available_time_utc)}")
             if now_utc >= next_available_time_utc:
                 logger.info("【自动引道】当前时间已到达或超过下次可执行时间，可以执行。")
@@ -185,22 +202,18 @@ class Plugin(BasePlugin):
                 self.info("【自动引道】超时检查任务安排成功。")
             else:
                  self.error("【自动引道】无法安排超时任务：Scheduler 不可用。")
-                 # --- 修复语法错误的地方 (line 192 in original error) ---
-                 try: # 尝试删除 redis key
+                 try:
                      if redis_client:
                          await redis_client.delete(redis_key)
                  except Exception as del_err:
                      self.warning(f"无法安排超时后清理 Redis key 失败: {del_err}")
-                 # --- 修复结束 ---
         except Exception as e:
             self.error(f"【自动引道】设置等待状态或超时任务时出错: {e}", exc_info=True)
-            # --- 修复语法错误的地方 (line 199 in corrected code block) ---
-            try: # 尝试在出错时删除 redis key
+            try:
                  if redis_client:
                      await redis_client.delete(redis_key)
             except Exception as del_err_f:
                  self.warning(f"设置出错后清理 Redis key 失败: {del_err_f}")
-            # --- 修复结束 ---
 
 
     async def handle_game_response(self, message: Message, is_reply_to_me: bool, is_mentioning_me: bool):
@@ -260,4 +273,3 @@ class Plugin(BasePlugin):
             except Exception as cleanup_e:
                 self.error(f"【自动引道】在响应错误处理中尝试清理和同步失败: {cleanup_e}")
             # --- 清理逻辑结束 ---
-
