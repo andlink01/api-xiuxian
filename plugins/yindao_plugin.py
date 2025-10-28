@@ -102,10 +102,10 @@ async def _check_yindao_status():
         char_status = await data_manager.get_character_status(my_id, use_cache=True)
         sect_info = await data_manager.get_sect_info(my_id, use_cache=True) # <-- 改为读取 sect_info
 
-        # --- 新增日志 ---
-        logger.info(f"【自动引道】获取到的 char_status 数据: {char_status}")
-        logger.info(f"【自动引道】获取到的 sect_info 数据: {sect_info}") # <-- 添加 sect_info 日志
-        # --- 新增结束 ---
+        # --- 修改日志级别 ---
+        logger.debug(f"【自动引道】获取到的 char_status 数据: {char_status}") # <-- 改为 DEBUG
+        logger.debug(f"【自动引道】获取到的 sect_info 数据: {sect_info}") # <-- 改为 DEBUG
+        # --- 修改结束 ---
 
         if not char_status: logger.warning("【自动引道】无法从 DataManager 获取角色状态缓存，跳过本次检查。"); return
         if not sect_info: logger.warning("【自动引道】无法从 DataManager 获取宗门信息缓存，跳过本次检查。"); return # <-- 检查 sect_info
