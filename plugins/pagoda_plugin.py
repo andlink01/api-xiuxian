@@ -12,7 +12,9 @@ from apscheduler.jobstores.base import JobLookupError
 # --- 常量 ---
 PAGODA_JOB_ID = 'auto_pagoda_job'
 PAGODA_COMMAND = ".闯塔"
-REDIS_LAST_RUN_KEY = "daily_task_last_run:pagoda"
+# --- 修改: 每日运行标记 Key 包含 user_id 和 date 占位符 ---
+REDIS_LAST_RUN_KEY_FORMAT = "daily_task_last_run:pagoda:{}:{}" # 格式: daily_task_last_run:pagoda:<user_id>:<YYYY-MM-DD>
+# --- 修改结束 ---
 RETRY_DELAY_MINUTES_CONFIG_KEY = "pagoda.retry_delay_minutes"
 DEFAULT_RETRY_DELAY_MINUTES = 60
 NEXT_DAY_SCHEDULE_HOUR_START = 1
@@ -21,6 +23,7 @@ NEXT_DAY_SCHEDULE_JITTER_SECONDS = 30 * 60
 
 async def _get_local_timezone(config) -> pytz.BaseTzInfo:
     """获取配置的本地时区，默认为上海"""
+    # ... (逻辑不变) ...
     try:
         local_tz_str = config.get("system.timezone", "Asia/Shanghai")
         return pytz.timezone(local_tz_str)
@@ -30,6 +33,7 @@ async def _get_local_timezone(config) -> pytz.BaseTzInfo:
 
 async def _schedule_next_day_run(context: AppContext):
     """安排任务在次日凌晨随机时间执行"""
+    # ... (逻辑不变) ...
     logger = logging.getLogger("PagodaPlugin.Scheduler")
     if not context or not context.scheduler:
         logger.error("【自动闯塔】无法安排下次任务：Scheduler 不可用。")
@@ -52,6 +56,7 @@ async def _schedule_next_day_run(context: AppContext):
 
 async def _schedule_retry(context: AppContext):
     """安排一个短期重试任务"""
+    # ... (逻辑不变) ...
     logger = logging.getLogger("PagodaPlugin.Scheduler")
     if not context or not context.scheduler:
         logger.error("【自动闯塔】无法安排重试：Scheduler 不可用。")
@@ -78,11 +83,11 @@ async def _execute_pagoda_and_reschedule():
     logger.info("【自动闯塔】任务执行：开始检查是否需要执行闯塔...")
 
     context = get_global_context()
-    if not context or not context.data_manager or not context.redis or not context.telegram_client or not context.event_bus: # 确保 event_bus 可用
+    if not context or not context.data_manager or not context.redis or not context.telegram_client or not context.event_bus:
         logger.error("【自动闯塔】无法执行：核心服务不可用。")
         return
 
-    config = context.config; event_bus = context.event_bus # 获取 event_bus
+    config = context.config; event_bus = context.event_bus
     auto_enabled = config.get("pagoda.auto_enabled", False)
     if not auto_enabled:
         logger.info("【自动闯塔】已被禁用，任务终止。")
@@ -90,7 +95,7 @@ async def _execute_pagoda_and_reschedule():
 
     redis_client = context.redis.get_client()
     my_id = context.telegram_client._my_id
-    my_username = context.telegram_client._my_username # 获取用户名
+    my_username = context.telegram_client._my_username
     if not my_id:
         logger.error("【自动闯塔】无法获取助手 User ID，任务终止。")
         return
@@ -101,10 +106,9 @@ async def _execute_pagoda_and_reschedule():
 
     last_attempt_date_str = None
     try:
+        # ... (强制刷新闯塔数据逻辑不变) ...
         logger.info("【自动闯塔】正在通过 DataManager 强制刷新闯塔缓存数据...")
-        # 强制刷新获取最新闯塔日期
         pagoda_cache_data = await context.data_manager.get_pagoda_progress(my_id, use_cache=False)
-
         if isinstance(pagoda_cache_data, dict):
              pagoda_progress_data = pagoda_cache_data.get("progress")
              if isinstance(pagoda_progress_data, dict):
@@ -122,6 +126,7 @@ async def _execute_pagoda_and_reschedule():
         return
 
     needs_pagoda = False
+    # ... (判断是否需要闯塔逻辑不变) ...
     if not last_attempt_date_str:
         logger.info("【自动闯塔】API 显示从未闯塔或记录丢失，需要执行。")
         needs_pagoda = True
@@ -134,6 +139,7 @@ async def _execute_pagoda_and_reschedule():
 
     if needs_pagoda:
         try:
+            # ... (发送闯塔指令逻辑不变) ...
             logger.info(f"【自动闯塔】正在将指令 '{PAGODA_COMMAND}' 加入发送队列...")
             success = await context.telegram_client.send_game_command(PAGODA_COMMAND)
             if success:
@@ -144,20 +150,21 @@ async def _execute_pagoda_and_reschedule():
                 except Exception as sync_e:
                     logger.error(f"【自动闯塔】尝试在发送指令后触发角色同步时出错: {sync_e}", exc_info=True)
 
-                # --- 新增：发送成功通知 ---
                 notify_msg = f"✅ [{my_username or my_id}] 今日自动闯塔指令已发送。"
                 try:
                     await event_bus.emit("send_system_notification", notify_msg)
                 except Exception as notify_e:
                     logger.error(f"【自动闯塔】发送完成通知失败: {notify_e}")
-                # --- 新增结束 ---
 
+                # --- 修改: 格式化标记 Key ---
                 if redis_client:
+                    redis_key = REDIS_LAST_RUN_KEY_FORMAT.format(my_id, current_date_str)
                     try:
-                        await redis_client.set(REDIS_LAST_RUN_KEY, current_date_str, ex=timedelta(days=2))
-                        logger.info(f"【自动闯塔】已在 Redis 记录今天 ({current_date_str}) 的运行。")
+                        await redis_client.set(redis_key, "1", ex=timedelta(days=2)) # 使用 "1" 作为值
+                        logger.info(f"【自动闯塔】已在 Redis 记录今天 ({current_date_str}) 的运行 ({redis_key})。")
                     except Exception as e_redis:
-                        logger.warning(f"【自动闯塔】在 Redis 记录上次运行时出错: {e_redis}")
+                        logger.warning(f"【自动闯塔】在 Redis ({redis_key}) 记录上次运行时出错: {e_redis}")
+                # --- 修改结束 ---
 
                 await _schedule_next_day_run(context)
             else:
@@ -166,25 +173,26 @@ async def _execute_pagoda_and_reschedule():
         except Exception as e_send:
             logger.error(f"【自动闯塔】将闯塔指令加入队列时出错: {e_send}", exc_info=True)
             await _schedule_retry(context)
-    else:
-        # 今天已完成的情况
+    else: # 今天已完成
         logger.info("【自动闯塔】今天已完成，安排明天任务。")
-        # --- 新增：仅在首次检测到完成时发送通知 ---
         send_completion_notify = False
+        # --- 修改: 格式化标记 Key ---
         if redis_client:
+             redis_key = REDIS_LAST_RUN_KEY_FORMAT.format(my_id, current_date_str)
              try:
-                 last_recorded_run = await redis_client.get(REDIS_LAST_RUN_KEY)
-                 if last_recorded_run != current_date_str:
+                 last_recorded_run = await redis_client.exists(redis_key) # 检查 Key 是否存在
+                 if not last_recorded_run:
                      send_completion_notify = True
-                     await redis_client.set(REDIS_LAST_RUN_KEY, current_date_str, ex=timedelta(days=2))
-                     logger.info(f"【自动闯塔】首次检测到今天 ({current_date_str}) 已完成，记录到 Redis。")
+                     await redis_client.set(redis_key, "1", ex=timedelta(days=2))
+                     logger.info(f"【自动闯塔】首次检测到今天 ({current_date_str}) 已完成，记录到 Redis ({redis_key})。")
                  else:
-                     logger.info(f"【自动闯塔】今天 ({current_date_str}) 已完成状态已记录，无需重复通知。")
+                     logger.info(f"【自动闯塔】今天 ({current_date_str}) 已完成状态已记录 ({redis_key})，无需重复通知。")
              except Exception as e_redis_check:
-                 logger.warning(f"【自动闯塔】在 Redis 检查或记录已完成时出错: {e_redis_check}")
-                 send_completion_notify = True # 出错时也尝试发送
+                 logger.warning(f"【自动闯塔】在 Redis ({redis_key}) 检查或记录已完成时出错: {e_redis_check}")
+                 send_completion_notify = True
         else:
-            send_completion_notify = True # Redis 不可用时也发送
+            send_completion_notify = True
+        # --- 修改结束 ---
 
         if send_completion_notify:
             notify_msg = f"✅ [{my_username or my_id}] 今日自动闯塔已完成。"
@@ -192,10 +200,10 @@ async def _execute_pagoda_and_reschedule():
                 await event_bus.emit("send_system_notification", notify_msg)
             except Exception as notify_e:
                 logger.error(f"【自动闯塔】发送完成通知失败: {notify_e}")
-        # --- 新增结束 ---
+
         await _schedule_next_day_run(context)
 
-# --- 插件类 (逻辑不变) ---
+# --- 插件类 (其余部分保持不变) ---
 class Plugin(BasePlugin):
     """自动闯塔插件 (智能调度版)"""
     def __init__(self, context: AppContext, plugin_name: str, cn_name: str | None = None):
@@ -208,18 +216,18 @@ class Plugin(BasePlugin):
         self.auto_enabled = self.config.get("pagoda.auto_enabled", False)
 
     def register(self):
+        # ... (注册逻辑不变) ...
         if not self.auto_enabled: return
         self.event_bus.on("telegram_client_started", self.initial_check_and_schedule)
         self.info(f"已注册 'telegram_client_started' 监听器，用于启动时检查闯塔任务。")
 
     async def initial_check_and_schedule(self):
         """应用启动时检查任务状态"""
-        # ... (启动检查逻辑保持不变) ...
         self.info("【自动闯塔】TG 客户端已启动，开始启动时检查任务状态...")
         await asyncio.sleep(random.uniform(10, 15)) # 随机延迟启动检查
 
         context = self.context
-        if not context or not context.scheduler or not context.data_manager or not context.redis or not context.telegram_client: # 确保 telegram_client 可用
+        if not context or not context.scheduler or not context.data_manager or not context.redis or not context.telegram_client:
              self.error("【自动闯塔】启动检查失败：核心服务不可用。")
              return
 
@@ -233,22 +241,30 @@ class Plugin(BasePlugin):
 
             local_tz = await _get_local_timezone(context.config); today_date_str = datetime.now(local_tz).strftime("%Y-%m-%d")
 
-            redis_client = context.redis.get_client(); last_run_date_redis = None
+            redis_client = context.redis.get_client(); last_run_completed_today = False
+            # --- 修改: 格式化标记 Key ---
             if redis_client:
-                 try: last_run_date_redis = await redis_client.get(REDIS_LAST_RUN_KEY)
-                 except Exception as e_redis: self.warning(f"【自动闯塔】启动检查：读取 Redis LastRunKey 失败: {e_redis}")
+                 redis_key = REDIS_LAST_RUN_KEY_FORMAT.format(my_id, today_date_str)
+                 try: last_run_completed_today = await redis_client.exists(redis_key)
+                 except Exception as e_redis: self.warning(f"【自动闯塔】启动检查：读取 Redis LastRunKey ({redis_key}) 失败: {e_redis}")
+            # --- 修改结束 ---
 
-            last_attempt_date = last_run_date_redis # 优先使用 Redis 记录
-
-            if not last_attempt_date:
-                self.info("【自动闯塔】启动检查：Redis 中无上次运行记录，检查 DataManager 缓存...")
+            last_attempt_date_api = None
+            if not last_run_completed_today:
+                self.info("【自动闯塔】启动检查：Redis 中无今日运行记录，检查 DataManager 缓存...")
                 pagoda_cache = await context.data_manager.get_pagoda_progress(my_id, use_cache=True)
                 if pagoda_cache and isinstance(pagoda_cache.get("progress"), dict):
-                    last_attempt_date = pagoda_cache["progress"].get("last_attempt_date")
+                    last_attempt_date_api = pagoda_cache["progress"].get("last_attempt_date")
+                    if last_attempt_date_api == today_date_str:
+                        last_run_completed_today = True
+                        if redis_client:
+                             redis_key = REDIS_LAST_RUN_KEY_FORMAT.format(my_id, today_date_str)
+                             try: await redis_client.set(redis_key, "1", ex=timedelta(days=2))
+                             except: pass
 
-            self.info(f"【自动闯塔】启动检查：今天日期 '{today_date_str}', 上次完成日期 '{last_attempt_date}'")
+            self.info(f"【自动闯塔】启动检查：今天日期 '{today_date_str}', 是否已完成 '{last_run_completed_today}' (基于Redis标记或API缓存: {last_attempt_date_api})")
 
-            if last_attempt_date == today_date_str:
+            if last_run_completed_today:
                 self.info("【自动闯塔】启动检查：今天已完成。")
                 if not job:
                     self.warning("【自动闯塔】启动检查：今天已完成，但未找到未来的调度任务！将安排明天任务。")

@@ -19,43 +19,49 @@ except ImportError: trigger_item_sync_update = None
 try: from plugins.shop_sync_plugin import trigger_shop_sync_update; SHOP_SYNC_ENABLED = True
 except ImportError: trigger_shop_sync_update = None; SHOP_SYNC_ENABLED = False
 
+# --- 导入包含 user_id 格式的 Key 常量 ---
 from plugins.constants import REDIS_CHAR_KEY_PREFIX, REDIS_INV_KEY_PREFIX, REDIS_ITEM_MASTER_KEY
-try: from plugins.cultivation_plugin import REDIS_WAITING_KEY_PREFIX as CULTIVATION_WAITING_KEY_PREFIX
-except ImportError: CULTIVATION_WAITING_KEY_PREFIX = "cultivation_waiting_msg_id"
-try: from plugins.herb_garden_plugin import HERB_GARDEN_ACTION_LOCK_KEY
-except ImportError: HERB_GARDEN_ACTION_LOCK_KEY = "herb_garden:action_lock"
-try: from plugins.marketplace_transfer_plugin import REDIS_ORDER_EXEC_LOCK_PREFIX
+try: from plugins.cultivation_plugin import REDIS_WAITING_KEY_PREFIX # 已经是格式化字符串
+except ImportError: REDIS_WAITING_KEY_PREFIX = "cultivation_waiting_msg_id:{}" # 提供后备
+try: from plugins.herb_garden_plugin import HERB_GARDEN_ACTION_LOCK_KEY_FORMAT # 导入药园锁格式
+except ImportError: HERB_GARDEN_ACTION_LOCK_KEY_FORMAT = "herb_garden:action_lock:{}" # 提供后备
+try: from plugins.marketplace_transfer_plugin import REDIS_ORDER_EXEC_LOCK_PREFIX # 交易锁前缀
 except ImportError: REDIS_ORDER_EXEC_LOCK_PREFIX = "marketplace_order_exec:lock:"
+try: from plugins.sect_teach_plugin import REDIS_PENDING_PLACEHOLDER_KEY_PREFIX, REDIS_TEACH_LOCK_KEY_FORMAT # 导入传功锁格式和占位符前缀
+except ImportError: REDIS_PENDING_PLACEHOLDER_KEY_PREFIX = "sect_teach:pending_placeholder"; REDIS_TEACH_LOCK_KEY_FORMAT = "sect_teach:action_lock:{}" # 提供后备
+# --- 导入结束 ---
 
-
+# --- 修改: 更新 COMMAND_MENU_TEXT 格式 (移除指令间多余空格) ---
 COMMAND_MENU_TEXT = """
 🎮 **修仙助手 - 指令菜单**
 
 🔍 **查询功能**
-  `,查询角色`, `,查询背包`, `,查询商店`
-  `,已学配方`, `,查询配方`, `,缓存状态`
+  👤`,查询角色` 🎒`,查询背包` 🏦`,查询商店`
+  📜`,已学配方` 🧪`,查询配方` 📊`,缓存状态`
 
 🔄 **同步功能**
-  `,同步角色`, `,同步背包`, `,同步物品`
-  `,同步商店`
+  👤`,同步角色` 🎒`,同步背包` 💎`,同步物品`
+  🏦`,同步商店`
 
 👉 **手动操作**
-  `,智能炼制`
-  `,发送`    , `,收货`
+  🛠️`,智能炼制`
+  ➡️`,发送` 📥`,收货`
 
 💾 **数据管理**
-  `,查询题库`, `,添加题库`, `,删除题库`
-  `,更新配方`
+  📚`,查询题库` ➕`,添加题库` 🗑️`,删除题库`
+  📝`,更新配方`
 
 ⚙️ **系统管理**
-  `,任务列表`, `,日志级别`, `,清除状态`
-  `,插件`    , `,配置`    , `,日志`
+  📅`,任务列表` 📈`,日志级别` 🧹`,清除状态`
+  🧩`,插件` 🔧`,配置` 📄`,日志`
 
 ℹ️ **帮助**
-  `,菜单`    , `,帮助`
+  🧭`,菜单` ❓`,帮助`
 """
+# --- 修改结束 ---
 
 HELP_DETAILS = {
+    # ... (帮助信息保持不变) ...
     "菜单": "显示指令菜单。",
     "查询角色": "查询您当前角色的基本信息 (仅读取缓存)。",
     "查询背包": "查询您当前储物袋的内容 (仅读取缓存)。",
@@ -69,9 +75,7 @@ HELP_DETAILS = {
     "同步物品": "手动强制从 API 同步一次物品主数据到缓存 (忽略每日限制)。",
     "发送": "让助手向游戏群发送指定的游戏指令。\n用法: `,发送 <游戏指令>`",
     "收货": "【接收方用】让机器人发布求购单，触发多账号资源转移流程。\n用法1: `,收货 <物品> <数量>`\n用法2: `,收货 <需求物品> <需求数量> <支付物品> <支付数量>`",
-    # --- (修改: 更新智能炼制帮助信息) ---
     "智能炼制": "自动检查配方学习状态和材料并执行炼制，材料不足时尝试收集。\n用法: `,智能炼制 <物品名>[*数量]` 或 `,智能炼制 <物品名> [数量]`",
-    # --- (修改结束) ---
     "更新配方": "【限收藏夹】将消息内容作为配方文本更新到 Redis。\n用法: `,更新配方 [--overwrite]` (消息体包含配方)",
     "查询题库": "搜索或列出玄骨/天机题库。\n用法: `,查询题库 [玄骨|天机] [关键词]` (不带关键词则列出全部)",
     "添加题库": "添加或更新玄骨/天机问答对。\n用法: `,添加题库 [玄骨|天机] 问题文本::答案文本`",
@@ -81,7 +85,7 @@ HELP_DETAILS = {
     "配置": "查看或设置功能模块。\n用法: `,配置` 或 `,配置 <配置项> <新值>`",
     "日志": "查看最近的日志信息。\n用法: `,日志 [类型] [行数]`",
     "日志级别": "查看或设置日志级别。\n用法: `,日志级别` 或 `,日志级别 <级别>`",
-    "清除状态": "手动清除 Redis 锁或标记。\n用法: `,清除状态 <类型>`",
+    "清除状态": "手动清除 Redis 锁或标记。\n用法: `,清除状态 <类型>` (可选类型: 药园锁, 闭关等待, 传功锁, 传功占位符, 交易订单锁)",
     "帮助": "查看指令的详细说明和用法。\n用法: `,帮助 <指令名>`",
 }
 
@@ -108,6 +112,7 @@ class Plugin(BasePlugin):
         self.info("已注册 admin_command_received 事件监听器。")
 
     async def handle_admin_command(self, message: Message, my_username: str | None):
+        # ... (命令解析和分发逻辑保持不变) ...
         raw_text = message.text or message.caption
         if not raw_text: return
         if not self.admin_id: self.warning("管理员 ID 未配置，无法处理指令。"); return
@@ -143,15 +148,12 @@ class Plugin(BasePlugin):
         self.info(f"处理管理员指令: '{command}' (来自收藏夹: {is_saved_message}) (参数: {args})")
 
         edit_target_id = None
-
         fast_view_commands_no_args = ["帮助", "配置", "日志级别", "插件", "清除状态"]
         always_direct_reply_commands = ["菜单", "查询角色", "查询背包", "查询商店", "已学配方", "缓存状态", "任务列表"]
         should_send_processing = True
         if command in always_direct_reply_commands: should_send_processing = False
         elif command in fast_view_commands_no_args and args is None: should_send_processing = False
         elif command in ["发送", "收货"]: should_send_processing = False
-        # 智能炼制现在可能需要一些时间计算，所以保持发送 "处理中..."
-        # elif command == "智能炼制": should_send_processing = False
 
         if should_send_processing:
             if is_control_group or (is_private and not is_saved_message):
@@ -161,8 +163,17 @@ class Plugin(BasePlugin):
                  status_msg = await self._send_status_message(message, f"⏳ 正在处理配方更新...")
                  edit_target_id = status_msg.id if status_msg else None
 
-        # --- 指令分发 ---
-        if command == "菜单": await self._command_menu(message, edit_target_id=edit_target_id)
+        # --- 指令分发 (仅显示相关部分) ---
+        if command == "清除状态":
+             if not args:
+                 clear_help = HELP_DETAILS.get("清除状态", "用法: ,清除状态 <类型>")
+                 if "可选类型:" not in clear_help:
+                      clear_help += "\n(可选类型: 药园锁, 闭关等待, 传功锁, 传功占位符, 交易订单锁)"
+                 await self._edit_or_reply(message.chat.id, edit_target_id, clear_help, original_message=message)
+                 return
+             await self._command_clear_state(message, args, edit_target_id)
+        # ... (其他指令处理保持不变) ...
+        elif command == "菜单": await self._command_menu(message, edit_target_id=edit_target_id)
         elif command == "帮助":
             if not args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("帮助", "用法: ,帮助 <指令名>"), original_message=message); return
             await self._command_help(message, args, edit_target_id=edit_target_id)
@@ -189,47 +200,26 @@ class Plugin(BasePlugin):
              if not full_args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("发送", "用法: ,发送 <游戏指令>"), original_message=message); return
              await self._command_send_game_cmd(message, full_args)
         elif command == "收货":
-             await self.event_bus.emit("admin_command_received", message, my_username)
-        # --- (修改: 解析智能炼制指令的数量) ---
+             await self.event_bus.emit("admin_command_received", message, my_username) # 假设收货由 marketplace 插件监听处理
         elif command == "智能炼制":
             if not args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("智能炼制"), original_message=message); return
-            item_name = args.strip()
-            quantity = 1
-            # 尝试匹配 "物品名*数量"
+            item_name = args.strip(); quantity = 1
             match_star = re.match(r"(.+?)\s*\*\s*(\d+)$", item_name)
-            # 尝试匹配 "物品名 数量"
             match_space = re.match(r"(.+?)\s+(\d+)$", item_name)
-
             if match_star:
                 item_name = match_star.group(1).strip()
-                try:
-                    quantity = int(match_star.group(2))
-                    if quantity <= 0: quantity = 1 # 保证数量大于0
-                except ValueError:
-                    quantity = 1 # 解析失败则默认为1
+                try: quantity = int(match_star.group(2)); quantity = max(1, quantity)
+                except ValueError: quantity = 1
             elif match_space:
-                # 再次检查以避免误匹配物品名中的空格
-                # 简单的处理：如果物品名部分能在 item_master 中找到，则认为是 "物品名 数量"
-                # （这里 admin_plugin 不直接访问 item_master，所以先假设匹配成功）
                 item_name_candidate = match_space.group(1).strip()
                 quantity_candidate_str = match_space.group(2)
-                # 尝试将第二部分解析为数字
                 try:
                      quantity_test = int(quantity_candidate_str)
-                     if quantity_test > 0:
-                          item_name = item_name_candidate
-                          quantity = quantity_test
-                     # 如果解析为0或负数，则忽略数量，保持 quantity=1 和原始 item_name
-                except ValueError:
-                     # 如果第二部分不是数字，说明是物品名的一部分，保持 quantity=1 和原始 item_name
-                     pass # item_name 和 quantity 保持原样
-
-            # 确保 quantity > 0
-            if quantity <= 0: quantity = 1
-
+                     if quantity_test > 0: item_name = item_name_candidate; quantity = quantity_test
+                except ValueError: pass
+            quantity = max(1, quantity)
             self.info(f"解析智能炼制指令: 物品='{item_name}', 数量={quantity}")
-            await self.event_bus.emit("smart_crafting_command", message, item_name, quantity, edit_target_id) # 传递数量
-        # --- (修改结束) ---
+            await self.event_bus.emit("smart_crafting_command", message, item_name, quantity, edit_target_id)
         elif command == "更新配方":
              if is_saved_message:
                  recipe_text_to_pass = ""; overwrite_flag = False
@@ -260,12 +250,8 @@ class Plugin(BasePlugin):
             if args:
                 parts = args.split(maxsplit=1)
                 first_part_lower = parts[0].lower()
-                if first_part_lower in ["玄骨", "xuangu"]:
-                    qa_type = "玄骨";
-                    if len(parts) > 1: keyword = parts[1].strip()
-                elif first_part_lower in ["天机", "tianji"]:
-                    qa_type = "天机"
-                    if len(parts) > 1: keyword = parts[1].strip()
+                if first_part_lower in ["玄骨", "xuangu"]: qa_type = "玄骨"; keyword = parts[1].strip() if len(parts) > 1 else None
+                elif first_part_lower in ["天机", "tianji"]: qa_type = "天机"; keyword = parts[1].strip() if len(parts) > 1 else None
                 else: keyword = args.strip()
             await self.event_bus.emit("query_qa_command", message, qa_type, keyword, edit_target_id)
         elif command == "添加题库":
@@ -285,9 +271,6 @@ class Plugin(BasePlugin):
         elif command == "配置": await self.event_bus.emit("system_config_command", message, args, edit_target_id)
         elif command == "日志": await self.event_bus.emit("system_log_command", message, args, edit_target_id)
         elif command == "日志级别": await self.event_bus.emit("system_loglevel_command", message, args, edit_target_id)
-        elif command == "清除状态":
-             if not args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("清除状态", "用法: ,清除状态 <类型>"), original_message=message); return
-             await self._command_clear_state(message, args, edit_target_id)
         else:
              reply_text = f"❓ 未知指令: `{command}`\n请发送 `,菜单` 查看可用指令。"
              await self._edit_or_reply(message.chat.id, edit_target_id, reply_text, original_message=message)
@@ -296,6 +279,7 @@ class Plugin(BasePlugin):
         await self._edit_or_reply(message.chat.id, edit_target_id, COMMAND_MENU_TEXT, original_message=message)
 
     async def _command_help(self, message: Message, args: str | None, edit_target_id: int | None = None):
+         # ... (此函数逻辑保持不变) ...
          if not args:
               reply = HELP_DETAILS.get("帮助", "用法: ,帮助 <指令名>") + "\n\n可查询帮助的指令:\n`" + "`, `".join(sorted(HELP_DETAILS.keys())) + "`"
          else:
@@ -305,6 +289,7 @@ class Plugin(BasePlugin):
          await self._edit_or_reply(message.chat.id, edit_target_id, reply, original_message=message)
 
     async def _command_send_game_cmd(self, message: Message, game_command: str | None):
+         # ... (此函数逻辑保持不变) ...
          if not game_command: reply_text = HELP_DETAILS.get("发送", "❌ 用法: ,发送 <游戏指令>"); await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message); return
          if not self.telegram_client_instance: reply_text = "❌ 错误: Telegram 客户端不可用。"; self.error("无法发送 ,发送 指令: TelegramClient 不可用。"); await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message); return
          try:
@@ -319,21 +304,35 @@ class Plugin(BasePlugin):
                   await self._send_to_control_chat(f"(指令 '{game_command[:20]}...' 执行结果)\n{reply_text}")
 
     async def _command_clear_state(self, message: Message, args: str | None, edit_target_id: int | None):
+         # ... (此函数逻辑保持不变，已包含 user_id 隔离) ...
          self.info(f"处理 ,清除状态 指令 (参数: {args})")
          if not self.context.redis: await self._edit_or_reply(message.chat.id, edit_target_id, "❌ 错误: Redis 未初始化。", original_message=message); return
          redis_client = self.context.redis.get_client(); my_id = self.telegram_client_instance._my_id if self.telegram_client_instance else None
          if not redis_client: await self._edit_or_reply(message.chat.id, edit_target_id, "❌ 错误: 无法连接到 Redis。", original_message=message); return
          if not my_id: self.warning("清除状态时无法获取 my_id"); await self._edit_or_reply(message.chat.id, edit_target_id, "❌ 错误: 无法获取助手 User ID。", original_message=message); return
+
          key_to_clear = None; key_name = ""; deleted_count = 0; reply = ""
          args_lower = args.strip().lower() if args else ""
-         if args_lower == "药园锁": key_to_clear = HERB_GARDEN_ACTION_LOCK_KEY; key_name = "药园操作锁"
-         elif args_lower == "闭关等待": key_to_clear = f"{CULTIVATION_WAITING_KEY_PREFIX}:{my_id}"; key_name = "闭关等待状态"
-         elif args_lower == "传功锁": key_to_clear = "sect_teach:action_lock"; key_name = "传功检查锁"
-         elif args_lower == "传功占位符": key_to_clear = f"sect_teach:pending_placeholder:{my_id}"; key_name = "传功占位符等待标记"
-         elif args_lower == "交易订单锁": key_to_clear = f"{REDIS_ORDER_EXEC_LOCK_PREFIX}*:{my_id}"; key_name = f"当前账号({my_id})的所有交易执行锁"
+
+         if args_lower == "药园锁":
+             key_to_clear = HERB_GARDEN_ACTION_LOCK_KEY_FORMAT.format(my_id)
+             key_name = "药园操作锁"
+         elif args_lower == "闭关等待":
+             key_to_clear = REDIS_WAITING_KEY_PREFIX.format(my_id) # 闭关等待 Key
+             key_name = "闭关等待状态"
+         elif args_lower == "传功锁":
+             key_to_clear = REDIS_TEACH_LOCK_KEY_FORMAT.format(my_id) # 传功检查锁 Key
+             key_name = "传功检查锁"
+         elif args_lower == "传功占位符":
+             key_to_clear = f"{REDIS_PENDING_PLACEHOLDER_KEY_PREFIX}{my_id}"
+             key_name = "传功占位符等待标记"
+         elif args_lower == "交易订单锁":
+             key_to_clear = f"{REDIS_ORDER_EXEC_LOCK_PREFIX}*:{my_id}" # 使用通配符 *
+             key_name = f"当前账号({my_id})的所有交易执行锁"
          else:
              reply = HELP_DETAILS.get("清除状态", "❌ 参数错误。用法: ,清除状态 <类型>")
              await self._edit_or_reply(message.chat.id, edit_target_id, reply, original_message=message); return
+
          try:
              if '*' in key_to_clear:
                  self.info(f"准备使用 SCAN 删除匹配 '{key_to_clear}' 的键...")
@@ -353,6 +352,7 @@ class Plugin(BasePlugin):
          except Exception as e: reply = f"❌ 清除 Redis 状态时发生错误: {e}"; self.error(f"清除 Key '{key_to_clear}' 时出错: {e}", exc_info=True)
          await self._edit_or_reply(message.chat.id, edit_target_id, reply, original_message=message)
 
+    # --- 辅助函数 (_edit_or_reply, _send_status_message, _send_to_control_chat) 保持不变 ---
     async def _edit_or_reply(self, chat_id: int, message_id: int | None, text: str, original_message: Message):
         tg_client = self.telegram_client_instance
         if not tg_client or not tg_client.app.is_connected: self.error("无法编辑/回复：TG 客户端不可用。"); return

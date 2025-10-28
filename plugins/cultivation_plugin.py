@@ -13,8 +13,10 @@ from core.context import get_global_context
 # --- 常量 ---
 JOB_ID = 'auto_cultivation_job'
 TIMEOUT_JOB_ID = 'cultivation_timeout_job'
-REDIS_WAITING_KEY_PREFIX = "cultivation_waiting_msg_id" # Redis 等待状态 Key 前缀 (仍需)
-REDIS_ERROR_NOTIFY_LOCK_KEY = "cultivation:error_notify_lock" # Redis 错误通知锁 Key (仍需)
+REDIS_WAITING_KEY_PREFIX = "cultivation_waiting_msg_id:{}" # Redis 等待状态 Key 格式 (使用占位符)
+# --- 修改: 错误通知锁 Key 包含 user_id 占位符 ---
+REDIS_ERROR_NOTIFY_LOCK_KEY_FORMAT = "cultivation:error_notify_lock:{}" # Redis 错误通知锁 Key 格式
+# --- 修改结束 ---
 ERROR_NOTIFY_LOCK_TTL = 3600
 RESPONSE_KEYWORDS = ["【闭关成功】", "【闭关失败】", "灵气尚未平复"]
 STARTUP_DELAY_SECONDS = 15
@@ -37,29 +39,29 @@ async def _send_cultivation_command_to_queue():
         logger.info("【自动闭关】已被禁用，取消本次指令发送。")
         return
 
-    my_id = context.telegram_client._my_id # 假设已初始化
+    my_id = context.telegram_client._my_id
 
     if not my_id:
         logger.error("【自动闭关】无法获取助手 User ID，跳过本次闭关并安排重试调度。")
         asyncio.create_task(_schedule_retry_scheduling())
         return
 
-    redis_client = context.redis.get_client() # 需要 RedisClient 来操作等待锁
+    redis_client = context.redis.get_client()
     if not redis_client:
         logger.error("【自动闭关】Redis 未连接，无法检查等待状态，跳过本次闭关并安排重试调度。")
         asyncio.create_task(_schedule_retry_scheduling())
         return
 
-    redis_key = f"{REDIS_WAITING_KEY_PREFIX}:{my_id}"
+    # --- 修改: 格式化等待 Key ---
+    redis_key = REDIS_WAITING_KEY_PREFIX.format(my_id)
+    # --- 修改结束 ---
     try:
-        # 检查是否已在等待
         waiting_msg_id = await redis_client.get(redis_key)
         if waiting_msg_id:
             logger.warning(f"【自动闭关】尝试发送指令，但 Redis 状态显示仍在等待 MsgID: {waiting_msg_id} 的响应，本次跳过。")
             return
         logger.info("【自动闭关】检查 Redis 等待状态：当前非等待状态。")
 
-        # --- Phase 3: 获取实时状态验证 ---
         logger.info("【自动闭关】获取实时角色状态以确认是否可闭关...")
         latest_status_data = await context.data_manager.get_character_status(my_id, use_cache=False)
 
@@ -81,12 +83,9 @@ async def _send_cultivation_command_to_queue():
 
         if current_status not in ["normal"] or is_on_cooldown:
              logger.info(f"【自动闭关】实时状态检查不通过 (Status='{current_status}', CooldownActive={is_on_cooldown})，取消本次闭关，重新安排调度。")
-             # 不需要手动重试，让 _schedule_next_cultivation 根据新状态重新计算
              asyncio.create_task(_schedule_next_cultivation()) # 让主调度函数处理
              return
-        # --- Phase 3 结束 ---
 
-        # 验证通过，发送指令
         logger.info(f"【自动闭关】实时状态检查通过，正在将指令 '{command}' 加入发送队列...")
         success = await context.telegram_client.send_game_command(command)
         if success:
@@ -116,7 +115,9 @@ async def _handle_cultivation_timeout():
     redis_client = context.redis.get_client()
     if not redis_client: logger.error("【自动闭关】Redis 未连接，无法处理超时状态。"); return
 
-    redis_key = f"{REDIS_WAITING_KEY_PREFIX}:{my_id}"
+    # --- 修改: 格式化等待 Key ---
+    redis_key = REDIS_WAITING_KEY_PREFIX.format(my_id)
+    # --- 修改结束 ---
     try:
         waiting_msg_id_str = await redis_client.get(redis_key)
         if waiting_msg_id_str:
@@ -124,12 +125,10 @@ async def _handle_cultivation_timeout():
             await redis_client.delete(redis_key)
             logger.info("【自动闭关】超时状态已从 Redis 清除。")
 
-            # 触发缓存更新
             logger.info("【自动闭关】超时后触发角色数据同步...")
             try: await context.event_bus.emit("trigger_character_sync_now")
             except Exception as sync_e: logger.error(f"【自动闭关】超时后尝试触发角色同步时出错: {sync_e}", exc_info=True)
 
-            # 立即尝试安排下一次
             logger.info("【自动闭关】超时后立即尝试安排下一次闭关任务...")
             asyncio.create_task(_schedule_next_cultivation())
         else:
@@ -158,10 +157,9 @@ async def _schedule_next_cultivation():
         config = context.config; scheduler = context.scheduler
         redis = context.redis; telegram_client = context.telegram_client
         event_bus = context.event_bus; redis_client = redis.get_client()
-        data_manager = context.data_manager # 获取 DataManager
+        data_manager = context.data_manager
 
         auto_enabled = config.get("cultivation.auto_enabled", False)
-        # 检查插件实例的运行状态
         cultivation_plugin_instance = getattr(context, 'cultivation_plugin', None)
         if not auto_enabled or (cultivation_plugin_instance and not cultivation_plugin_instance.is_running_manually):
              logger.info("【自动闭关】已被禁用或手动停止，停止调度。")
@@ -170,38 +168,39 @@ async def _schedule_next_cultivation():
              logger.info(f"【自动闭关】已尝试移除主调度任务 (因禁用或停止)。")
              return
 
-        my_id = telegram_client._my_id # 假设已初始化
+        my_id = telegram_client._my_id
         if not my_id:
             logger.error("【自动闭关】无法获取助手 User ID，暂时无法安排下一次闭关。将在指定延迟后重试调度。")
             asyncio.create_task(_schedule_retry_scheduling())
             return
 
-        # --- Phase 2: 使用 DataManager 获取状态 ---
         logger.info(f"【自动闭关】准备使用 DataManager 获取用户 {my_id} 的状态缓存...")
         status_data = await data_manager.get_character_status(my_id, use_cache=True)
-        api_error = False # 标记是否获取数据出错
+        api_error = False
 
         if not status_data:
              logger.error("【自动闭关】无法从 DataManager 获取角色状态缓存，将安排重试。")
-             api_error = True # 将获取失败视为 API 错误处理
-             # 可以考虑在这里触发一次强制刷新
-             # await data_manager.get_character_status(my_id, use_cache=False)
-        # --- Phase 2 结束 ---
+             api_error = True
 
-        next_run_utc_dt = None # 下一次执行闭关指令的时间
+        next_run_utc_dt = None
         retry_delay_sec = int(config.get("cultivation.retry_delay_on_fail", 300))
         delay_range = config.get("cultivation.random_delay_range", [1, 5])
         min_delay_sec = max(0, int(delay_range[0]) if len(delay_range) > 0 else 1)
         max_delay_sec = max(min_delay_sec + 1, int(delay_range[1]) if len(delay_range) > 1 else 5)
         logger.info(f"【自动闭关】计算参数：随机延迟范围 [{min_delay_sec}, {max_delay_sec}] 秒, 失败重试延迟 {retry_delay_sec} 秒。")
 
-        if status_data: # 仅在成功获取到数据时处理
+        # --- 修改: 格式化错误锁 Key ---
+        error_lock_key = REDIS_ERROR_NOTIFY_LOCK_KEY_FORMAT.format(my_id) if my_id else None
+        # --- 修改结束 ---
+
+        if status_data:
             current_status = status_data.get("status")
             logger.info(f"【自动闭关】角色当前状态 (来自缓存): {current_status}")
 
             if current_status in ["deep_seclusion", "cultivating", "fleeing"]:
+                # ... (处理不适合闭关的状态，逻辑不变) ...
                 logger.info(f"【自动闭关】角色当前状态为 '{current_status}'，不适合普通闭关，将安排重试。")
-                deep_seclusion_end_str = status_data.get("deep_seclusion_end_time") # 注意：这里读的是原始 ISO 字符串
+                deep_seclusion_end_str = status_data.get("deep_seclusion_end_time")
                 retry_after_seconds = retry_delay_sec
                 if current_status == "deep_seclusion" and deep_seclusion_end_str:
                     deep_end_dt = parse_iso_datetime(deep_seclusion_end_str)
@@ -217,15 +216,17 @@ async def _schedule_next_cultivation():
                 asyncio.create_task(_schedule_retry_scheduling(delay_seconds=retry_after_seconds))
                 return
 
-            cooldown_str = status_data.get("cultivation_cooldown_until") # 读取原始 ISO 字符串
+            cooldown_str = status_data.get("cultivation_cooldown_until")
             logger.info(f"【自动闭关】从缓存获取到闭关冷却时间字符串: '{cooldown_str}'")
 
             if cooldown_str is None or cooldown_str == "":
+                # ... (计算立即执行时间，逻辑不变) ...
                 logger.info("【自动闭关】缓存显示可以立即闭关。计算下次运行时间...")
                 now_utc_dt = datetime.now(pytz.utc)
                 random_delay = timedelta(seconds=random.uniform(min_delay_sec, max_delay_sec))
                 next_run_utc_dt = now_utc_dt + random_delay
             elif isinstance(cooldown_str, str):
+                # ... (计算冷却后执行时间，逻辑不变) ...
                 logger.info(f"【自动闭关】尝试解析冷却时间字符串 '{cooldown_str}'...")
                 cooldown_utc_dt = parse_iso_datetime(cooldown_str)
                 if cooldown_utc_dt:
@@ -247,38 +248,42 @@ async def _schedule_next_cultivation():
                          logger.info(f"【自动闭关】计算出的下次运行时间 {format_local_time(next_run_utc_dt)} 在合理范围内。")
                 else:
                     logger.error(f"【自动闭关】无法解析缓存中的冷却时间戳字符串: '{cooldown_str}'，将安排重试。")
-                    api_error = True # 视为 API/数据 错误
-                    if redis_client and event_bus:
-                        if await redis_client.set(REDIS_ERROR_NOTIFY_LOCK_KEY, "1", ex=ERROR_NOTIFY_LOCK_TTL, nx=True):
+                    api_error = True
+                    # --- 修改: 使用格式化后的 error_lock_key ---
+                    if redis_client and event_bus and error_lock_key:
+                        if await redis_client.set(error_lock_key, "1", ex=ERROR_NOTIFY_LOCK_TTL, nx=True):
                             await event_bus.emit("send_system_notification", f"⚠️ **自动修炼 - 缓存数据错误** ⚠️\n\n无法解析缓存中的冷却时间戳 (收到字符串: `{cooldown_str}`)。\n自动修炼已暂停并进入重试循环。")
+                    # --- 修改结束 ---
             else:
                  logger.error(f"【自动闭关】缓存中的 'cultivation_cooldown_until' 字段类型未知 ({type(cooldown_str)}) 或为空，将安排重试。 Value: '{cooldown_str}'")
-                 api_error = True # 视为 API/数据 错误
-                 if redis_client and event_bus:
-                     if await redis_client.set(REDIS_ERROR_NOTIFY_LOCK_KEY, "1", ex=ERROR_NOTIFY_LOCK_TTL, nx=True):
+                 api_error = True
+                 # --- 修改: 使用格式化后的 error_lock_key ---
+                 if redis_client and event_bus and error_lock_key:
+                     if await redis_client.set(error_lock_key, "1", ex=ERROR_NOTIFY_LOCK_TTL, nx=True):
                          await event_bus.emit("send_system_notification", f"⚠️ **自动修炼 - 缓存数据错误** ⚠️\n\n缓存中 'cultivation_cooldown_until' 字段类型未知或为空 (收到: `{cooldown_str}`)。\n自动修炼已暂停并进入重试循环。")
+                 # --- 修改结束 ---
 
         else: # status_data 获取失败
             logger.error("【自动闭关】无法从 DataManager 获取状态，无法计算冷却时间，将安排重试。")
-            # api_error 已在上面标记为 True
 
-        # 处理 API 或数据错误
         if api_error:
-             if redis_client and event_bus: # 尝试发送通知 (如果之前没发过)
-                  if await redis_client.set(REDIS_ERROR_NOTIFY_LOCK_KEY, "1", ex=ERROR_NOTIFY_LOCK_TTL, nx=True):
+             # --- 修改: 使用格式化后的 error_lock_key ---
+             if redis_client and event_bus and error_lock_key:
+                  if await redis_client.set(error_lock_key, "1", ex=ERROR_NOTIFY_LOCK_TTL, nx=True):
                       error_reason = "获取状态缓存失败" if not status_data else "解析缓存时间戳失败"
                       await event_bus.emit("send_system_notification", f"⚠️ **自动修炼 - 数据错误** ⚠️\n\n{error_reason}，自动修炼已暂停并进入重试循环。")
+             # --- 修改结束 ---
 
-        # 如果成功计算出下次运行时间
         if next_run_utc_dt:
             logger.info(f"【自动闭关】最终确认下次执行闭关指令的时间: {format_local_time(next_run_utc_dt)}")
             try:
-                # 清除可能的错误通知锁
-                if redis_client:
+                # --- 修改: 使用格式化后的 error_lock_key ---
+                if redis_client and error_lock_key:
                     try:
-                        deleted_count = await redis_client.delete(REDIS_ERROR_NOTIFY_LOCK_KEY)
-                        if deleted_count > 0: logger.info("【自动闭关】成功清除 Redis 错误通知锁。")
-                    except Exception as e: logger.warning(f"【自动闭关】清除闭关错误通知锁失败: {e}")
+                        deleted_count = await redis_client.delete(error_lock_key)
+                        if deleted_count > 0: logger.info(f"【自动闭关】成功清除 Redis 错误通知锁 ({error_lock_key})。")
+                    except Exception as e_del: logger.warning(f"【自动闭关】清除闭关错误通知锁 ({error_lock_key}) 失败: {e_del}")
+                # --- 修改结束 ---
 
                 logger.info(f"【自动闭关】正在向 APScheduler 添加/更新任务 '{JOB_ID}'...")
                 if scheduler:
@@ -291,13 +296,12 @@ async def _schedule_next_cultivation():
                     logger.info(f"【自动闭关】成功安排下一次自动闭关任务在: {next_run_local_str}")
                 else:
                     logger.error("【自动闭关】无法安排任务：Scheduler 不可用。")
-                    asyncio.create_task(_schedule_retry_scheduling(delay_seconds=retry_delay_sec / 2)) # 快速重试
+                    asyncio.create_task(_schedule_retry_scheduling(delay_seconds=retry_delay_sec / 2))
 
             except Exception as e:
                 logger.critical(f"【自动闭关】安排下一次闭关任务 (_send_cultivation_command_to_queue) 失败: {e}", exc_info=True)
                 asyncio.create_task(_schedule_retry_scheduling(delay_seconds=retry_delay_sec / 2))
         else:
-            # 未能计算出下次执行时间
             logger.warning("【自动闭关】未能计算出下次执行时间，将安排重试调度。")
             asyncio.create_task(_schedule_retry_scheduling())
 
@@ -310,17 +314,16 @@ async def _schedule_next_cultivation():
             logger.critical(f"【自动闭关】在处理 _schedule_next_cultivation 异常后安排重试也失败了: {retry_e}")
 
 
+# --- 重试函数 (_schedule_retry_scheduling) 保持不变 ---
 _cult_retry_logger = logging.getLogger("CultivationPlugin.Retry")
 async def _schedule_retry_scheduling(delay_seconds: Optional[int | float] = None):
     """安排一个重试任务来再次调用 _schedule_next_cultivation"""
     logger = _cult_retry_logger
     logger.info("【自动闭关】触发重试调度逻辑...")
-
     context = get_global_context()
     if not context or not context.scheduler:
          logger.error("【自动闭关】无法安排重试：AppContext 或 Scheduler 不可用。")
          return
-
     scheduler = context.scheduler
     retry_delay_sec_config = int(context.config.get("cultivation.retry_delay_on_fail", 300))
     raw_delay = delay_seconds if delay_seconds is not None else retry_delay_sec_config
@@ -334,8 +337,6 @@ async def _schedule_retry_scheduling(delay_seconds: Optional[int | float] = None
             logger.info(f"【自动闭关】成功移除旧任务 '{JOB_ID}'。")
         except JobLookupError: logger.info(f"【自动闭关】旧任务 '{JOB_ID}' 未找到，无需移除。")
         except Exception as remove_err: logger.warning(f"【自动闭关】重试前移除旧任务 '{JOB_ID}' 时出错: {remove_err}")
-
-        # 添加新的重试任务
         logger.info(f"【自动闭关】正在向 APScheduler 添加/更新重试任务 '{JOB_ID}'...")
         scheduler.add_job(
             _schedule_next_cultivation, # 目标是再次运行主调度
@@ -348,7 +349,7 @@ async def _schedule_retry_scheduling(delay_seconds: Optional[int | float] = None
         logger.critical(f"【自动闭关】安排闭关重试任务失败: {e}", exc_info=True)
 
 
-# --- 插件类 ---
+# --- 插件类 (其余部分保持不变) ---
 class Plugin(BasePlugin):
     """实现自动闭关修炼功能。"""
     def __init__(self, context: AppContext, plugin_name: str, cn_name: str | None = None):
@@ -357,15 +358,14 @@ class Plugin(BasePlugin):
         self.load_config()
         self.is_running_manually = self.auto_enabled_config
         self.cultivation_command_text = self.config.get("cultivation.command", ".闭关修炼").strip()
-        if self.auto_enabled_config: self.info(f"插件已加载并根据配置初始化为【启用】状态。指令: '{self.command}'")
+        if self.auto_enabled_config: self.info(f"插件已加载并根据配置初始化为【启用】状态。指令: '{self.cultivation_command_text}'") # 使用 self.cultivation_command_text
         else: self.info("插件已加载并根据配置初始化为【禁用】状态。")
 
     def load_config(self):
         """加载配置"""
-        # ... (保持不变) ...
         self.info("正在加载/重新加载自动闭关配置...")
         self.auto_enabled_config = self.config.get("cultivation.auto_enabled", False)
-        self.command = self.config.get("cultivation.command", ".闭关修炼")
+        self.command = self.config.get("cultivation.command", ".闭关修炼") # self.command 可能未及时更新，用 self.cultivation_command_text
         self.cultivation_command_text = self.command.strip()
         self.timeout = int(self.config.get("cultivation.response_timeout", 120))
         delay_range = self.config.get("cultivation.random_delay_range", [1, 5])
@@ -378,7 +378,6 @@ class Plugin(BasePlugin):
 
     def register(self):
         """注册事件监听"""
-        # ... (保持不变) ...
         self.debug("register() 方法被调用。")
         try:
             self.event_bus.on("telegram_client_started", self.initial_check_and_schedule)
@@ -389,10 +388,8 @@ class Plugin(BasePlugin):
             self.info("已注册所有自动闭关相关事件监听器。")
         except Exception as e: self.error(f"注册事件监听器时发生错误: {e}", exc_info=True)
 
-
     async def initial_check_and_schedule(self):
         """启动时检查并开始调度"""
-        # ... (保持不变) ...
         self.info("监听到 'telegram_client_started' 事件，开始启动时检查与调度...")
         try:
             self.load_config()
@@ -419,14 +416,15 @@ class Plugin(BasePlugin):
 
     async def handle_command_sent(self, sent_message: Message, command_text: str):
         """监听闭关指令发送，设置等待状态和超时"""
-        # ... (保持不变) ...
         if command_text.strip() != self.cultivation_command_text: return
         self.info(f"监听到【闭关指令】已发送 (MsgID: {sent_message.id})，准备设置等待状态和超时任务。")
         my_id = self.context.telegram_client._my_id
         if not my_id: self.error("无法获取助手 User ID，无法设置等待状态！"); return
         redis_client = self.context.redis.get_client()
         if not redis_client: self.error("Redis 未连接，无法设置等待状态！"); return
-        redis_key = f"{REDIS_WAITING_KEY_PREFIX}:{my_id}"
+        # --- 修改: 格式化等待 Key ---
+        redis_key = REDIS_WAITING_KEY_PREFIX.format(my_id)
+        # --- 修改结束 ---
         timeout_seconds = self.timeout
         try:
             self.info(f"正在设置 Redis 等待状态 (Key: {redis_key}, Value: {sent_message.id}, TTL: {timeout_seconds + 60}s)...")
@@ -453,7 +451,6 @@ class Plugin(BasePlugin):
 
     async def handle_game_response(self, message: Message, is_reply_to_me: bool, is_mentioning_me: bool):
         """处理游戏响应，清除等待状态、触发缓存更新并立即安排下次"""
-        # ... (保持不变，已包含触发同步和安排下次) ...
         if not self.is_running_manually: return
         text = message.text or message.caption
         if not text: return
@@ -465,7 +462,9 @@ class Plugin(BasePlugin):
         if not my_id: self.error("无法获取助手 User ID，无法处理响应状态。"); return
         redis_client = self.context.redis.get_client()
         if not redis_client: self.error("Redis 未连接，无法处理响应状态。"); return
-        redis_key = f"{REDIS_WAITING_KEY_PREFIX}:{my_id}"
+        # --- 修改: 格式化等待 Key ---
+        redis_key = REDIS_WAITING_KEY_PREFIX.format(my_id)
+        # --- 修改结束 ---
         self.info(f"正在检查 Redis 等待状态 (Key: '{redis_key}')...")
         try:
             expected_command_id_str = await redis_client.get(redis_key)
@@ -498,10 +497,8 @@ class Plugin(BasePlugin):
                 except Exception: pass
                 asyncio.create_task(_schedule_next_cultivation())
 
-
     async def handle_start_auto_cultivation(self):
         """响应手动开启事件"""
-        # ... (保持不变) ...
         self.info("收到【手动开启】自动闭关的事件。")
         if self.is_running_manually: self.info("自动闭关已处于运行状态，无需再次启动。"); return
         self.info("标记状态为【运行中】，加载最新配置并开始调度...")
@@ -514,7 +511,6 @@ class Plugin(BasePlugin):
 
     async def handle_stop_auto_cultivation(self):
         """响应手动关闭事件"""
-        # ... (保持不变) ...
         self.info("收到【手动关闭】自动闭关的事件。")
         if not self.is_running_manually: self.info("自动闭关已处于停止状态，无需再次停止。"); return
         self.info("标记状态为【已停止】，并清理相关任务和状态...")
@@ -524,7 +520,6 @@ class Plugin(BasePlugin):
 
     async def _stop_internal(self):
         """内部停止逻辑"""
-        # ... (保持不变) ...
         self.info("执行内部停止逻辑：移除定时任务和 Redis 状态...")
         my_id = self.context.telegram_client._my_id if self.context.telegram_client else None
         if not my_id: self.warning("_stop_internal: 无法获取 my_id，无法清理 Redis Key。")
@@ -541,19 +536,20 @@ class Plugin(BasePlugin):
         if my_id and self.context.redis:
             redis_client = self.context.redis.get_client()
             if redis_client:
-                redis_key = f"{REDIS_WAITING_KEY_PREFIX}:{my_id}"
+                # --- 修改: 格式化等待 Key ---
+                redis_key = REDIS_WAITING_KEY_PREFIX.format(my_id)
+                # --- 修改结束 ---
                 try:
                     self.info(f"尝试清除 Redis 等待 Key: '{redis_key}'...")
                     deleted_count = await redis_client.delete(redis_key)
                     if deleted_count > 0: self.info(f"成功清除 Redis 等待 Key: '{redis_key}'")
                     else: self.info(f"Redis 等待 Key: '{redis_key}' 不存在。")
-                except Exception as e: self.error(f"清除 Redis 等待状态时出错: {e}", exc_info=True)
+                except Exception as e_del: self.error(f"清除 Redis 等待状态时出错: {e_del}", exc_info=True)
             else: self.warning("停止时无法连接 Redis 清理状态。")
         elif my_id: self.warning("停止时 Redis 客户端不可用，无法清理状态。")
 
     async def _ensure_no_duplicate_schedule(self):
          """确保启动前移除旧任务和状态"""
-         # ... (保持不变) ...
          self.info("确保移除旧的闭关调度任务和 Redis 状态...")
          await self._stop_internal()
          self.info("旧任务和状态清理完毕。")
