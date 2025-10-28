@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 虚拟环境
+.venv
+venv
+env
+
+# IDE 和系统文件
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# 持久化数据 (不应被构建到镜像中)
+data/
+logs/
+
+# 配置文件 (应通过卷挂载，而不是构建)
+config.yaml

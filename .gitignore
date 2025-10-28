@@ -1,0 +1,39 @@
+# 字节码和缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 敏感配置文件
+# ！！！极其重要：config.yaml 包含您的 API 密钥和私人 ID ！！！
+config.yaml
+
+# 本地数据和会话
+# ！！！极其重要：data/ 目录包含您的 Telegram 会话文件和数据库 ！！！
+data/
+
+# 日志文件
+logs/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+ENV/
+*.env
+
+# IDE 和系统文件
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# 部署脚本 (通常不需要版本控制)
+# deploy.sh
+
+# 示例文件
+*.txt.1.txt
+*.txt.1z.txt
+题目.txt
+

@@ -1,0 +1,30 @@
+# version: '3.8' # 已移除
+
+services:
+  game_assistant:
+    build: .
+    container_name: game_assistant
+    restart: unless-stopped
+    
+    volumes:
+      # 1. 挂载 config.yaml (不变)
+      - ./config.yaml:/app/config.yaml
+      
+      # --- (修改点: 分别映射 logs 和 data) ---
+      # 2. 将宿主机的 ./logs 映射到容器的 /app/logs
+      - ./logs:/app/logs
+      # 3. 将宿主机的 ./data 映射到容器的 /app/data
+      - ./data:/app/data
+      # --- (修改结束) ---
+      
+      # 挂载宿主机时区文件 (保持)
+      - /etc/localtime:/etc/localtime:ro 
+      
+    tty: true
+    stdin_open: true
+    
+    networks:
+      - default
+
+# networks: 
+#   default:
