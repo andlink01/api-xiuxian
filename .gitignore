@@ -32,7 +32,7 @@ ENV/
 # 部署脚本 (通常不需要版本控制)
 # deploy.sh
 
-# 示例文件
+# 示例文件1
 *.txt.1.txt
 *.txt.1z.txt
 题目.txt
