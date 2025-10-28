@@ -112,7 +112,6 @@ class Plugin(BasePlugin):
         # self.allowed_prefixes = string.punctuation
         # --- 移除结束 ---
 
-
     def register(self):
         self.event_bus.on("admin_command_received", self.handle_admin_command)
         self.info("已注册 admin_command_received 事件监听器。")
@@ -136,7 +135,7 @@ class Plugin(BasePlugin):
         elif is_private: should_process = True
         if not should_process: return
 
-        # --- 修改: 严格检查逗号前缀 ---
+        # --- 修改: 恢复严格检查逗号前缀 ---
         detected_prefix = None
         if command_text and command_text.startswith(','): # 只检查逗号
             detected_prefix = ','

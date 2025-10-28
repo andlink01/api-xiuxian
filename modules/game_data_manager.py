@@ -113,7 +113,7 @@ class GameDataManager:
                     "last_treasure_hunt_time": raw_data.get("last_treasure_hunt_time"),
                     "force_seclusion_cooldown_until": raw_data.get("force_seclusion_cooldown_until"),
                     "last_elixir_time": raw_data.get("last_elixir_time"), "last_bet_date": raw_data.get("last_bet_date"),
-                    "herb_garden": None, "pagoda_progress": None,
+                    "herb_garden": None, "pagoda_progress": None, # 初始化为 None
                 }
                 # 处理嵌套 JSON 和时间格式化
                 for field_name in ["active_formation", "active_yindao_buff", "herb_garden", "pagoda_progress"]:
@@ -121,42 +121,43 @@ class GameDataManager:
                     if isinstance(field_str, str):
                         try: field_data = json.loads(field_str)
                         except: logger.warning(f"解析字段 '{field_name}' 的 JSON 字符串失败。")
-                    elif isinstance(field_str, dict): field_data = field_str
+                    elif isinstance(field_str, dict): field_data = field_str # 如果 API 直接返回字典
+                    elif field_str is None: field_data = None # 处理 null 值
 
-                    # --- 修改: 使用 copy.deepcopy 确保 field_data 独立 ---
                     if isinstance(field_data, dict):
-                        # 使用深拷贝，避免后续修改影响原始 raw_data (如果 field_str 本身就是 dict)
-                        # 或者避免修改 status_data 影响到其他地方对 field_data 的引用
+                        # 使用深拷贝，确保操作的是独立的字典副本
                         status_data[field_name] = copy.deepcopy(field_data)
                         current_field_dict = status_data[field_name] # 操作 status_data 中的副本
 
                         # 特殊处理药园地块时间
                         if field_name == "herb_garden" and isinstance(current_field_dict.get("plots"), dict):
-                              # --- 修改: 迭代 plots 的副本 ---
-                              for plot_id, plot_info in list(current_field_dict["plots"].items()): # 迭代副本
+                              # --- 修复: 迭代 plots 的副本列表 ---
+                              for plot_id, plot_info in list(current_field_dict["plots"].items()): # 迭代副本列表
                                   if isinstance(plot_info, dict) and plot_info.get("plant_time"):
                                       parsed_dt_p = parse_iso_datetime(plot_info["plant_time"])
                                       # 直接在 current_field_dict (即 status_data[field_name]) 中添加新键
                                       current_field_dict["plots"][plot_id]["plant_time_formatted"] = format_local_time(parsed_dt_p)
-                              # --- 修改结束 ---
+                              # --- 修复结束 ---
 
-                        # --- 修改: 迭代 current_field_dict.items() 的副本 ---
+                        # --- 修复: 迭代 current_field_dict.items() 的副本列表 ---
                         # 处理其他嵌套字典中的时间
-                        for key, value in list(current_field_dict.items()): # 迭代副本
-                             if isinstance(value, str) and ("_time" in key or "_until" in key or key == "expiry"):
+                        for key, value in list(current_field_dict.items()): # 迭代副本列表
+                             if isinstance(value, str) and ("_time" in key or "_until" in key or key == "expiry" or "_date" in key): # 增加 _date 检查
                                   parsed_dt_inner = parse_iso_datetime(value)
                                   if parsed_dt_inner:
                                       # 直接在 current_field_dict 中添加新键
                                       current_field_dict[key + "_formatted"] = format_local_time(parsed_dt_inner)
-                        # --- 修改结束 ---
-                    # --- 修改结束 ---
-
+                        # --- 修复结束 ---
+                    elif field_data is None: # 如果 API 返回 null
+                         status_data[field_name] = None
+                    # else: field_data 解析失败或不是字典，保持 status_data[field_name] 为 None
 
                 # 格式化顶层时间戳 (逻辑不变)
-                time_keys_to_format = ["cultivation_cooldown_until", "deep_seclusion_start_time", "deep_seclusion_end_time", "last_yindao_time", "last_battle_time", "last_dummy_practice_time", "last_dungeon_time", "last_trial_time", "last_treasure_hunt_time", "force_seclusion_cooldown_until", "last_elixir_time"]
+                time_keys_to_format = ["cultivation_cooldown_until", "deep_seclusion_start_time", "deep_seclusion_end_time", "last_yindao_time", "last_battle_time", "last_dummy_practice_time", "last_dungeon_time", "last_trial_time", "last_treasure_hunt_time", "force_seclusion_cooldown_until", "last_elixir_time", "sect_leave_cooldown_until"] # 增加 sect_leave_cooldown_until
                 for key in time_keys_to_format:
-                    if status_data.get(key):
-                        parsed_dt = parse_iso_datetime(status_data[key]); status_data[key + "_formatted"] = format_local_time(parsed_dt)
+                    if raw_data.get(key): # 从 raw_data 获取原始值
+                        parsed_dt = parse_iso_datetime(raw_data[key]); status_data[key + "_formatted"] = format_local_time(parsed_dt)
+                        status_data[key] = raw_data[key] # 确保原始值也被放入 status_data
 
                 status_key = CHAR_STATUS_KEY.format(user_id)
                 pipe.set(status_key, json.dumps(status_data, ensure_ascii=False), ex=status_ttl)
@@ -188,17 +189,17 @@ class GameDataManager:
                 logger.debug(f"【数据管理器】准备更新 {sect_key} (TTL: ~{sect_ttl}s)")
                 executed_pipe = True
 
-                # --- 4. 处理药园数据 (逻辑不变, 使用 status_data 处理后的结果) ---
-                if status_data["herb_garden"]:
+                # --- 4. 处理药园数据 (使用 status_data 处理后的结果) ---
+                if status_data.get("herb_garden") is not None: # 检查是否为 None
                      garden_data_to_store = { "_internal_last_updated": now_aware_str, **status_data["herb_garden"] }
                      garden_key = CHAR_GARDEN_KEY.format(user_id)
                      pipe.set(garden_key, json.dumps(garden_data_to_store, ensure_ascii=False), ex=garden_ttl)
                      logger.debug(f"【数据管理器】准备更新 {garden_key} (TTL: ~{garden_ttl}s)")
                      executed_pipe = True
-                else: logger.warning("【数据管理器】API 未返回药园数据或解析失败，未更新药园缓存。")
+                else: logger.info("【数据管理器】API 未返回药园数据或解析为 None，不更新药园缓存。")
 
-                # --- 5. 处理闯塔数据 (逻辑不变, 使用 status_data 处理后的结果) ---
-                if status_data["pagoda_progress"]:
+                # --- 5. 处理闯塔数据 (使用 status_data 处理后的结果) ---
+                if status_data.get("pagoda_progress") is not None: # 检查是否为 None
                      pagoda_data_to_store = {
                          "_internal_last_updated": now_aware_str,
                          "progress": status_data["pagoda_progress"], # 解析后的字典
@@ -206,11 +207,20 @@ class GameDataManager:
                          "resets_today": raw_data.get("pagoda_resets_today"),
                          "claimed_floors_str": raw_data.get("pagoda_claimed_floors") # 原始字符串
                      }
+                     # 尝试解析 claimed_floors
+                     try:
+                         claimed_floors_list = json.loads(pagoda_data_to_store["claimed_floors_str"]) if pagoda_data_to_store["claimed_floors_str"] else []
+                         pagoda_data_to_store["claimed_floors"] = claimed_floors_list if isinstance(claimed_floors_list, list) else []
+                     except:
+                         logger.warning(f"解析闯塔已领取楼层JSON失败: {pagoda_data_to_store['claimed_floors_str']}")
+                         pagoda_data_to_store["claimed_floors"] = []
+
                      pagoda_key = CHAR_PAGODA_KEY.format(user_id)
                      pipe.set(pagoda_key, json.dumps(pagoda_data_to_store, ensure_ascii=False), ex=pagoda_ttl)
                      logger.debug(f"【数据管理器】准备更新 {pagoda_key} (TTL: ~{pagoda_ttl}s)")
                      executed_pipe = True
-                else: logger.warning("【数据管理器】API 未返回闯塔进度数据或解析失败，未更新闯塔缓存。")
+                else: logger.info("【数据管理器】API 未返回闯塔进度数据或解析为 None，不更新闯塔缓存。")
+
 
                 # --- 6. 处理已学配方 (逻辑不变) ---
                 recipes_str = raw_data.get("recipes_known"); recipes_list_processed = None
