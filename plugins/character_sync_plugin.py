@@ -157,13 +157,16 @@ class Plugin(BasePlugin):
         username = self.context.telegram_client._my_username
         if not user_id or not username:
             self.error("【角色/背包同步】无法获取 User ID 或 Username，无法执行立即同步。")
-            await self.context.event_bus.emit("send_system_notification", "❌ 无法执行角色/背包立即同步：缺少用户信息。")
+            # 即使无法获取用户信息，也无需发送通知
+            # await self.context.event_bus.emit("send_system_notification", "❌ 无法执行角色/背包立即同步：缺少用户信息。")
             return
 
         success, message = await trigger_character_sync(self.context, user_id, username)
+        # --- 修改: 移除或注释掉发送通知的代码 ---
         # 手动触发时，将结果通知给管理员
-        try:
-             await self.context.event_bus.emit("send_system_notification", f"手动触发角色/背包同步结果:\n{message}")
-        except Exception as e:
-             self.error(f"发送手动同步结果通知失败: {e}")
+        # try:
+        #      await self.context.event_bus.emit("send_system_notification", f"手动触发角色/背包同步结果:\n{message}")
+        # except Exception as e:
+        #      self.error(f"发送手动同步结果通知失败: {e}")
+        # --- 修改结束 ---
 
