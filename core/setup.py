@@ -5,16 +5,134 @@ import getpass
 from pyrogram import Client
 from pyrogram.enums import ChatType
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
-import os # 导入 os
+import os
+import copy # 导入 copy 模块用于深拷贝
 
 # --- 从 core.config 导入 CONFIG_PATH ---
-# 注意：这假设 setup.py 和 config.py 在同一 core 目录下
 try:
     from .config import CONFIG_PATH
 except ImportError:
-    # 如果直接运行 setup.py (不推荐)，提供一个后备路径
     CONFIG_PATH = "config.yaml"
 # --- 导入结束 ---
+
+# --- 定义完整的默认配置结构 ---
+DEFAULT_CONFIG = {
+    'telegram': {
+        'api_id': 0, # 占位符，会被用户输入覆盖
+        'api_hash': '', # 占位符
+        'admin_id': 0, # 会被自动设置
+        'target_chat_id': 0, # 占位符
+        'control_chat_id': 0, # 占位符
+        'game_bot_ids': [], # 占位符
+        'command_delay': 10.5 # 默认指令延迟
+    },
+    'redis': {
+        'host': 'localhost',
+        'port': 6379,
+        'db': 0,
+        'password': None
+    },
+    'api_services': {
+        'shared_cookie': ''
+    },
+    'gemini': {
+        'api_keys': []
+    },
+    'database': {
+        'sqlite_url': 'sqlite:///data/local_data.db' # 默认数据库路径
+    },
+    'game_api': {
+        'target_username': '' # 留空则自动获取
+    },
+    'sync_intervals': {
+        'character': 5,
+        'inventory': 15 # 注意：这个值会被 cache_ttl.inventory 覆盖实际缓存时间
+    },
+    'sync_on_startup': {
+        'character': True,
+        'inventory': True,
+        'shop': True,
+        'item': True
+    },
+    'cache_ttl': { # 缓存有效期 (秒)
+        'status': 360,
+        'inventory': 1200,
+        'sect': 3600,
+        'garden': 360,
+        'pagoda': 86400,
+        'recipes': 43200,
+        'item_master': 90000,
+        'shop': 90000
+    },
+    'logging': {
+        'level': 'INFO'
+    },
+    'xuangu_exam': {
+        'enabled': True,
+        'auto_answer': True,
+        'use_ai_fallback': True,
+        'answer_delay_seconds': 5,
+        'notify_on_unknown_question': True
+    },
+    'cultivation': {
+        'auto_enabled': True,
+        'command': '.闭关修炼',
+        'response_timeout': 120,
+        'random_delay_range': [1, 5],
+        'retry_delay_on_fail': 300
+    },
+    'herb_garden': {
+        'enabled': True,
+        'check_interval_minutes': 5,
+        'target_seed_name': '凝血草种子', # 默认种植目标
+        'min_seed_reserve': 0,      # 默认不保留
+        'buy_seed_quantity': 10     # 默认每次购买10个
+    },
+    'yindao': {
+        'auto_enabled': True,
+        'check_interval_minutes': 10,
+        'response_timeout': 120
+    },
+    'sect_checkin': {
+        'auto_enabled': True,
+        'retry_delay_minutes': 60
+    },
+    'sect_teach': {
+        'auto_enabled': True,
+        'check_interval_minutes': 30,
+        'reply_delay_seconds': 1.5,
+        'next_teach_delay_range': [2.0, 5.0]
+    },
+    'pagoda': {
+        'auto_enabled': True,
+        'retry_delay_minutes': 60
+    },
+    'auto_learn_recipe': {
+        'enabled': True,
+        'checks_per_day': 5
+    },
+    'marketplace_transfer': {
+        'enabled': True,
+        'default_pay_item_name': '灵石',
+        'default_pay_quantity': 1,
+        'request_channel': 'marketplace:requests',
+        'order_channel': 'marketplace:orders',
+        'result_channel': 'marketplace:results'
+    },
+    'nascent_soul': {
+        'auto_enabled': True,
+        'recheck_interval_range_minutes': [15, 30],
+        'egress_hours': 8,
+        'schedule_buffer_minutes': [2, 5]
+    },
+    'demon_lord': {
+        'auto_enabled': True,
+        'high_risk_probability': 0.2,
+        'response_delay_seconds': [5, 15]
+    }
+    # 在这里添加其他插件的默认配置段...
+}
+# --- 默认配置结构定义结束 ---
 
 
 async def input_safe(prompt: str) -> str:
@@ -147,12 +265,20 @@ async def select_game_bots_from_chat(client: Client, chat_id: int) -> list[int]:
         print("未选择任何 Game Bot 频道。", file=sys.stderr)
     return selected_ids
 
+
 async def run_setup(config_path: str): # config_path 用于写入
     """
-    运行交互式设置的主函数 - 提示到 stderr，直接写入文件
+    运行交互式设置的主函数 - 提示到 stderr，直接写入合并后的完整配置
     """
     print("--- 欢迎使用 xiuxian-bot 交互式设置 ---", file=sys.stderr)
-    config_data = {}
+    # 这个字典只收集交互式输入的部分
+    user_input_data = {
+        'telegram': {},
+        'redis': {},
+        'api_services': {},
+        'gemini': {},
+        'database': {}
+    }
     print("您已连接到设置向导。", file=sys.stderr)
     await input_safe("\n>>> 请按 Enter 键开始设置... <<<")
 
@@ -164,32 +290,26 @@ async def run_setup(config_path: str): # config_path 用于写入
         api_id_str = await input_safe("请输入 api_id: ")
         if not api_id_str.isdigit():
             print("输入无效。api_id 必须是纯数字，请重新输入。", file=sys.stderr)
-    config_data['telegram'] = {
-        'api_id': int(api_id_str),
-        'api_hash': await input_safe("请输入 api_hash: ")
-    }
+    user_input_data['telegram']['api_id'] = int(api_id_str)
+    user_input_data['telegram']['api_hash'] = await input_safe("请输入 api_hash: ")
 
     # 2. 登录 Telegram
     print("\n--- 2. 登录 Telegram ---", file=sys.stderr)
     print("Pyrogram (Kurigram) 将尝试登录。请准备接收验证码。", file=sys.stderr)
-    # --- 恢复使用文件会话 ---
-    # 确保 data 目录存在 (Dockerfile 中已创建，这里再次确保)
     session_dir = "data"
     os.makedirs(session_dir, exist_ok=True)
     session_path = os.path.join(session_dir, "my_game_assistant")
     client = Client(
-        session_path, # 使用文件会话路径
-        api_id=config_data['telegram']['api_id'],
-        api_hash=config_data['telegram']['api_hash']
-        # 移除 in_memory=True
+        session_path,
+        api_id=user_input_data['telegram']['api_id'],
+        api_hash=user_input_data['telegram']['api_hash']
     )
-    # --- 恢复结束 ---
     try:
         await client.start()
         me = await client.get_me()
         print(f"\n登录成功！欢迎, {me.first_name} (ID: {me.id})", file=sys.stderr)
         print(f"已自动将您的账户 (ID: {me.id}) 设为管理员。", file=sys.stderr)
-        config_data['telegram']['admin_id'] = me.id
+        user_input_data['telegram']['admin_id'] = me.id
     except (PhoneCodeInvalid, PasswordHashInvalid) as e:
         print(f"\n登录失败: {e}", file=sys.stderr)
         print("请检查您的输入。退出设置。", file=sys.stderr)
@@ -202,7 +322,7 @@ async def run_setup(config_path: str): # config_path 用于写入
             me = await client.get_me()
             print(f"\n登录成功！欢迎, {me.first_name} (ID: {me.id})", file=sys.stderr)
             print(f"已自动将您的账户 (ID: {me.id}) 设为管理员。", file=sys.stderr)
-            config_data['telegram']['admin_id'] = me.id
+            user_input_data['telegram']['admin_id'] = me.id
         except Exception as e:
             print(f"\n2FA 密码错误或登录失败: {e}", file=sys.stderr)
             await client.stop()
@@ -214,18 +334,16 @@ async def run_setup(config_path: str): # config_path 用于写入
 
     # 3. 选择群组和 Game Bots
     print("\n--- 3. 选择群组和 Game Bots ---", file=sys.stderr)
-    target_chat_id = await select_group_dialog(client, "游戏群 (Game Group)")
-    config_data['telegram']['target_chat_id'] = target_chat_id
-    control_chat_id = await select_group_dialog(client, "控制群 (Control Group)")
-    config_data['telegram']['control_chat_id'] = control_chat_id
+    user_input_data['telegram']['target_chat_id'] = await select_group_dialog(client, "游戏群 (Game Group)")
+    user_input_data['telegram']['control_chat_id'] = await select_group_dialog(client, "控制群 (Control Group)")
     game_bot_ids = []
-    if target_chat_id:
-        game_bot_ids = await select_game_bots_from_chat(client, target_chat_id)
+    if user_input_data['telegram']['target_chat_id']:
+        game_bot_ids = await select_game_bots_from_chat(client, user_input_data['telegram']['target_chat_id'])
     else:
         print("未选择游戏群，跳过 Game Bot 频道筛选。", file=sys.stderr)
-    config_data['telegram']['game_bot_ids'] = game_bot_ids
+    user_input_data['telegram']['game_bot_ids'] = game_bot_ids
     await client.stop()
-    print("Telegram 客户端会话已保存并断开。", file=sys.stderr) # 现在会话被保存了
+    print("Telegram 客户端会话已保存并断开。", file=sys.stderr)
 
     # 4. Redis
     print("\n--- 4. Redis 数据库设置 ---", file=sys.stderr)
@@ -239,50 +357,59 @@ async def run_setup(config_path: str): # config_path 用于写入
         redis_db_str = await input_safe("请输入 Redis 数据库 (默认 0): ") or "0"
         if not redis_db_str.isdigit():
             print("输入无效。数据库必须是纯数字，请重新输入。", file=sys.stderr)
-    config_data['redis'] = {
-        'host': await input_safe("请输入 Redis 主机 (e.g., your.redis-server.com): "),
-        'port': int(redis_port_str),
-        'db': int(redis_db_str),
-        'password': await input_secure("请输入 Redis 密码 (如果没有请留空): ")
-    }
+    user_input_data['redis']['host'] = await input_safe("请输入 Redis 主机 (e.g., your.redis-server.com): ")
+    user_input_data['redis']['port'] = int(redis_port_str)
+    user_input_data['redis']['db'] = int(redis_db_str)
+    user_input_data['redis']['password'] = await input_secure("请输入 Redis 密码 (如果没有请留空): ")
 
     # 5. API Services (Cookie)
     print("\n--- 5. API 服务设置 (可选) ---", file=sys.stderr)
-    config_data['api_services'] = {
-        'shared_cookie': await input_safe("请输入共享 Cookie (如果不需要请留空): ")
-    }
+    user_input_data['api_services']['shared_cookie'] = await input_safe("请输入共享 Cookie (如果不需要请留空): ")
 
     # 6. Gemini
     print("\n--- 6. Gemini API 密钥 (可选) ---", file=sys.stderr)
     keys_str = await input_safe("请输入您的 Gemini API 密钥 (多个请用逗号 ',' 分隔): ")
-    config_data['gemini'] = {
-        'api_keys': [key.strip() for key in keys_str.split(',') if key.strip()]
-    }
+    user_input_data['gemini']['api_keys'] = [key.strip() for key in keys_str.split(',') if key.strip()]
 
     # 7. Database
     print("\n--- 7. 数据库路径设置 ---", file=sys.stderr)
-    db_path_default = "sqlite:///data/local_data.db"
+    db_path_default = DEFAULT_CONFIG['database']['sqlite_url'] # 从默认配置获取
     print(f"数据库文件将存储在容器内的 /app/data/local_data.db，对应宿主机的 ./data/local_data.db", file=sys.stderr)
     db_path_input = await input_safe(f"请确认或修改数据库 URL (默认为 '{db_path_default}'): ") or db_path_default
-    config_data['database'] = {
-        'sqlite_url': db_path_input
-    }
+    user_input_data['database']['sqlite_url'] = db_path_input
 
-    # --- 8. 写入配置到文件 ---
-    print("\n--- 正在保存配置 ---", file=sys.stderr)
+    # --- 8. 合并配置并写入文件 ---
+    print("\n--- 正在合并配置并保存 ---", file=sys.stderr)
+    # 使用深拷贝确保不修改原始 DEFAULT_CONFIG
+    final_config_data = copy.deepcopy(DEFAULT_CONFIG)
+
+    # 递归合并用户输入（处理嵌套字典）
+    def merge_dicts(base, update):
+        for key, value in update.items():
+            if isinstance(value, dict) and key in base and isinstance(base[key], dict):
+                merge_dicts(base[key], value)
+            elif value is not None: # 只有当用户输入了有效值时才覆盖
+                 # 特殊处理空密码：如果用户输入空字符串，则设为 None
+                 if key == 'password' and value == '':
+                     base[key] = None
+                 else:
+                    base[key] = value
+        return base
+
+    final_config_data = merge_dicts(final_config_data, user_input_data)
+
     try:
         # 直接使用导入的 CONFIG_PATH
         with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-            yaml.dump(config_data, f, indent=2, allow_unicode=True, sort_keys=False)
-        print(f"配置已成功写入 {CONFIG_PATH}", file=sys.stderr)
+            yaml.dump(final_config_data, f, indent=2, allow_unicode=True, sort_keys=False)
+        print(f"完整配置已成功写入 {CONFIG_PATH}", file=sys.stderr)
         print("\n设置完成！", file=sys.stderr)
         print("正在退出... 容器将继续或自动重启以应用新配置。", file=sys.stderr)
-        # 正常退出，让 main.py 继续（如果适用）或让 Docker 重启
     except Exception as e:
         print(f"写入配置文件 {CONFIG_PATH} 失败: {e}", file=sys.stderr)
         print("请检查文件权限或路径。", file=sys.stderr)
         sys.exit(1)
-    # --- 写入结束 ---
+    # --- 合并与写入结束 ---
 
 if __name__ == "__main__":
     # 此脚本不应被直接运行
