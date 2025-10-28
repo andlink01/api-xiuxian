@@ -24,9 +24,9 @@ else
         chmod 666 "$CONFIG_FILE"
         echo "初始配置文件内容已写入并确保权限。" >&2
     else
-        # 对于已存在的文件，尝试确保容器内有写权限（对 ro 挂载会失败，但无妨）
+        # 对于已存在的文件，尝试确保容器内有写权限（现在挂载是 rw，应该能成功）
         chmod u+w "$CONFIG_FILE" 2>/dev/null || true
-        echo "尝试确保容器对现有 $CONFIG_FILE 具有写权限（只读挂载下会失败）。" >&2
+        echo "尝试确保容器对现有 $CONFIG_FILE 具有写权限。" >&2
     fi
 fi
 

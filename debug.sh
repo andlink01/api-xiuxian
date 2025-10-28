@@ -13,9 +13,6 @@ echo "--- 正在停止并清理旧的开发容器和网络 ---"
 # 使用 -f 指定文件，确保停止正确的服务
 docker compose $COMPOSE_FILES down --remove-orphans
 
-# 不需要 --rmi 'local'，因为我们总是重新构建开发镜像
-# docker compose $COMPOSE_FILES down --rmi 'local' --remove-orphans
-
 echo "--- 正在强制重新构建开发镜像 (docker compose build --no-cache) ---"
 # 使用 -f 指定文件进行构建
 docker compose $COMPOSE_FILES build --no-cache $SERVICE_NAME
@@ -24,8 +21,8 @@ echo "--- 正在启动新的开发容器 (docker compose up -d) ---"
 # 使用 -f 指定文件启动
 docker compose $COMPOSE_FILES up -d $SERVICE_NAME
 
-echo "--- 正在进入实时日志 (无前缀) ---" # 修改提示信息
+echo "--- 正在进入实时日志 (无前缀) ---"
 echo "--- 按 Ctrl+C 停止跟踪日志 (不会停止容器) ---"
 # 使用 -f 指定文件查看日志，并添加 --no-log-prefix 选项
-docker compose $COMPOSE_FILES logs -f --no-log-prefix $SERVICE_NAME # <-- 修改处
+docker compose $COMPOSE_FILES logs -f --no-log-prefix $SERVICE_NAME
 

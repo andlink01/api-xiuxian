@@ -2,14 +2,14 @@
 
 services:
   game_assistant:
-    # 拉取您在 Docker Hub 上的镜像
+    # 拉取您在 Docker Hub 上的镜像 (生产) 或本地构建 (开发时会被覆盖)
     image: lostme01/api-xiuxian:latest # 确保这是您正确的镜像名称和标签
     container_name: game_assistant
     restart: unless-stopped
 
     volumes:
-      # 配置文件挂载为只读 (ro)
-      - ./config.yaml:/app/config.yaml:ro
+      # 配置文件挂载为读写 (rw) - 这是关键修改
+      - ./config.yaml:/app/config.yaml:rw
       # 日志目录挂载
       - ./logs:/app/logs
       # 数据目录挂载 (包含数据库和 session)
