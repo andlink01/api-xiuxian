@@ -108,9 +108,6 @@ class Plugin(BasePlugin):
         if not self.telegram_client_instance:
              self.error("初始化时无法获取 TelegramClient 实例！编辑/回复/发送功能可能受限。")
         self.info("管理插件 (入口) 已加载。")
-        # --- 移除: 不再需要允许的前缀列表 ---
-        # self.allowed_prefixes = string.punctuation
-        # --- 移除结束 ---
 
     def register(self):
         self.event_bus.on("admin_command_received", self.handle_admin_command)
@@ -128,11 +125,19 @@ class Plugin(BasePlugin):
         is_control_group = message.chat.id == self.control_chat_id
         should_process = False
 
+        # --- 修改: 处理控制群提及 ---
         if is_control_group:
             mention = f"@{my_username}" if my_username else None
             if mention and mention in command_text:
-                should_process = True; command_text = command_text.replace(mention, "", 1).strip()
-        elif is_private: should_process = True
+                # 只有当提及的是当前机器人时才处理
+                should_process = True
+                # 从文本中移除提及，无论在开头还是中间
+                command_text = command_text.replace(mention, "").strip()
+            # 如果没有提及，则不处理 (除非后续有特殊指令判断)
+        elif is_private:
+            should_process = True
+        # --- 修改结束 ---
+
         if not should_process: return
 
         # --- 修改: 恢复严格检查逗号前缀 ---
@@ -144,7 +149,7 @@ class Plugin(BasePlugin):
             command = command_parts[0].lower() # 命令转小写
             args = command_parts[1].strip() if len(command_parts) > 1 else None
         # --- 修改结束 ---
-        else: return # 如果没有逗号前缀，则忽略
+        else: return # 如果没有逗号前缀，则忽略 (提及已被移除)
 
         if command is None: return
         self.info(f"处理管理员指令 (前缀: '{detected_prefix}'): '{command}' (来自收藏夹: {is_saved_message}) (参数: {args})")
@@ -166,7 +171,7 @@ class Plugin(BasePlugin):
                  status_msg = await self._send_status_message(message, f"⏳ 正在处理配方更新...")
                  edit_target_id = status_msg.id if status_msg else None
 
-        # --- 指令分发 (仅显示相关部分) ---
+        # --- 指令分发 ---
         if command == "清除状态":
              if not args:
                  clear_help = HELP_DETAILS.get("清除状态", "用法: ,清除状态 <类型>")
@@ -192,16 +197,12 @@ class Plugin(BasePlugin):
         elif command == "同步背包": await self.event_bus.emit("sync_inventory_command", message, edit_target_id)
         elif command == "同步商店": await self.event_bus.emit("sync_shop_command", message, edit_target_id)
         elif command == "同步物品": await self.event_bus.emit("sync_items_command", message, edit_target_id)
+        # --- 修改: 将发送指令的处理移交给 _command_send_game_cmd ---
         elif command == "发送":
-             full_args = None; cmd_prefix_len = 0
-             if raw_text:
-                 if raw_text.startswith(','): prefix_to_check = ',' + command # 显式检查逗号
-                 else: prefix_to_check = None # 其他前缀不处理
-                 if prefix_to_check and raw_text.lower().startswith(prefix_to_check.lower()):
-                     cmd_prefix_len = len(prefix_to_check)
-                     full_args = raw_text[cmd_prefix_len:].strip()
-             if not full_args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("发送", "用法: ,发送 <游戏指令>"), original_message=message); return
-             await self._command_send_game_cmd(message, full_args)
+             # 直接使用已经移除提及并解析好的 args
+             if not args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("发送", "用法: ,发送 <游戏指令>"), original_message=message); return
+             await self._command_send_game_cmd(message, args) # 传递 args 而不是重新解析
+        # --- 修改结束 ---
         elif command == "智能炼制":
             if not args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("智能炼制"), original_message=message); return
             item_name = args.strip(); quantity = 1
@@ -271,13 +272,10 @@ class Plugin(BasePlugin):
         elif command == "日志": await self.event_bus.emit("system_log_command", message, args, edit_target_id)
         elif command == "日志级别": await self.event_bus.emit("system_loglevel_command", message, args, edit_target_id)
         else:
-             mtp_loaded = self.context.plugin_statuses.get("marketplace_transfer_plugin") == "enabled"
-             if command == "收货" and not mtp_loaded:
-                 reply_text = f"⚠️ 指令 `{command}` 需要 `marketplace_transfer_plugin` 插件，但该插件未加载或未启用。"
-             else:
-                 self.debug(f"未找到指令 '{command}' 的处理程序，忽略。") # 记录日志但不回复
-                 return # 直接返回，不发送 "未知指令"
-             await self._edit_or_reply(message.chat.id, edit_target_id, reply_text, original_message=message)
+             # 对于其他所有指令 (包括 `,收货`)，事件总线会分发给相应的插件
+             # 如果没有插件处理，就不做任何事
+             self.debug(f"指令 '{command}' 由 AdminPlugin 分发，等待其他插件处理...")
+             # 移除未知指令的回复逻辑
 
 
     async def _command_menu(self, message: Message, edit_target_id: int | None = None):
@@ -293,20 +291,48 @@ class Plugin(BasePlugin):
               reply = f"❓ **指令帮助: `,`{cleaned_name}**\n\n{detail}" if detail else f"❌ 找不到指令 `{cleaned_name}` 的帮助信息。\n请发送 `,菜单` 查看可用指令。"
          await self._edit_or_reply(message.chat.id, edit_target_id, reply, original_message=message)
 
-    async def _command_send_game_cmd(self, message: Message, game_command: str | None):
-         # ... (此函数逻辑保持不变) ...
-         if not game_command: reply_text = HELP_DETAILS.get("发送", "❌ 用法: ,发送 <游戏指令>"); await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message); return
-         if not self.telegram_client_instance: reply_text = "❌ 错误: Telegram 客户端不可用。"; self.error("无法发送 ,发送 指令: TelegramClient 不可用。"); await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message); return
+    # --- 修改: _command_send_game_cmd 使用传入的 args ---
+    async def _command_send_game_cmd(self, message: Message, game_command_args: str | None):
+         """处理 ,发送 指令，直接使用解析好的参数，并移除提及"""
+         if not game_command_args: # 检查传入的参数
+             reply_text = HELP_DETAILS.get("发送", "❌ 用法: ,发送 <游戏指令>")
+             await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message)
+             return
+
+         # 移除参数中的 @username 提及
+         game_command_cleaned = re.sub(r'@\w+', '', game_command_args).strip()
+
+         if not game_command_cleaned: # 如果移除提及后参数为空
+              reply_text = "❌ 发送的指令内容不能为空（移除提及后）。"
+              await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message)
+              return
+
+         if not self.telegram_client_instance:
+             reply_text = "❌ 错误: Telegram 客户端不可用。"
+             self.error("无法发送 ,发送 指令: TelegramClient 不可用。")
+             await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message)
+             return
+
          try:
-             self.info(f"准备通过 ,发送 指令将 '{game_command[:50]}...' 加入队列..."); success = await self.telegram_client_instance.send_game_command(game_command)
-             if success: reply_text = f"✅ 指令 `{game_command[:50]}{'...' if len(game_command) > 50 else ''}` 已加入队列。"; self.info(f"指令 '{game_command[:50]}...' 已加入队列。")
-             else: reply_text = f"❌ 将指令 `{game_command[:50]}{'...' if len(game_command) > 50 else ''}` 加入队列失败。"; self.error(f"通过 ,发送 指令将 '{game_command[:50]}...' 加入队列失败。")
-         except Exception as e: reply_text = f"❌ 发送指令时发生错误: {e}"; self.error(f"处理 ,发送 指令 '{game_command[:50]}...' 时出错: {e}", exc_info=True)
+             self.info(f"准备通过 ,发送 指令将 '{game_command_cleaned[:50]}...' 加入队列...");
+             success = await self.telegram_client_instance.send_game_command(game_command_cleaned) # 发送清理后的指令
+             if success:
+                 reply_text = f"✅ 指令 `{game_command_cleaned[:50]}{'...' if len(game_command_cleaned) > 50 else ''}` 已加入队列。"
+                 self.info(f"指令 '{game_command_cleaned[:50]}...' 已加入队列。")
+             else:
+                 reply_text = f"❌ 将指令 `{game_command_cleaned[:50]}{'...' if len(game_command_cleaned) > 50 else ''}` 加入队列失败。"
+                 self.error(f"通过 ,发送 指令将 '{game_command_cleaned[:50]}...' 加入队列失败。")
+         except Exception as e:
+             reply_text = f"❌ 发送指令时发生错误: {e}"
+             self.error(f"处理 ,发送 指令 '{game_command_cleaned[:50]}...' 时出错: {e}", exc_info=True)
+
+         # 决定在哪里回复 (私聊或控制群)
          if message.chat.type == ChatType.PRIVATE or self.control_chat_id == message.chat.id:
               await self._edit_or_reply(message.chat.id, None, reply_text, original_message=message)
-         else:
+         else: # 如果是在其他群组（理论上不应该，但作为 fallback）
               if self.control_chat_id:
-                  await self._send_to_control_chat(f"(指令 '{game_command[:20]}...' 执行结果)\n{reply_text}")
+                  await self._send_to_control_chat(f"(指令 '{game_command_cleaned[:20]}...' 执行结果)\n{reply_text}")
+    # --- 修改结束 ---
 
     async def _command_clear_state(self, message: Message, args: str | None, edit_target_id: int | None):
          # ... (此函数逻辑保持不变，已包含 user_id 隔离) ...
