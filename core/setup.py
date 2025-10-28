@@ -177,7 +177,7 @@ async def run_setup(config_path: str):
     print("\n--- 2. 登录 Telegram ---")
     print("Pyrogram (Kurigram) 将尝试登录。请准备接收验证码。")
     client = Client(
-        "session_data/my_game_assistant",
+        "data/my_game_assistant",
         api_id=config_data['telegram']['api_id'],
         api_hash=config_data['telegram']['api_hash']
     )
