@@ -41,6 +41,3 @@ jobs:
           tags: |
             lostme01/api-xiuxian:latest
             lostme01/api-xiuxian:${{ github.sha }}
-            # 我们推送两个标签：
-            # 1. latest：始终指向最新的版本
-            # 2. git sha：一个唯一的版本标识符 (例如: f0a8f8d)
