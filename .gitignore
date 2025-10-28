@@ -3,14 +3,25 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.so
 
 # 敏感配置文件
 # ！！！极其重要：config.yaml 包含您的 API 密钥和私人 ID ！！！
 config.yaml
+# 如果您使用 .env 文件存储环境变量，取消下一行的注释
+# .env*
 
 # 本地数据和会话
 # ！！！极其重要：data/ 目录包含您的 Telegram 会话文件和数据库 ！！！
 data/
+# 避免意外提交数据库日志文件
+data/*-journal
 
 # 日志文件
 logs/
@@ -20,20 +31,39 @@ venv/
 .venv/
 env/
 ENV/
-*.env
+env.bak/
+venv.bak/
 
 # IDE 和系统文件
 .idea/
 .vscode/
 *.swp
 *~
+*.bak
+*.tmp
 .DS_Store
+*.sublime-project
+*.sublime-workspace
 
-# 部署脚本 (通常不需要版本控制)
-# deploy.sh
+# 操作系统文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# 示例文件1
-*.txt.1.txt
-*.txt.1z.txt
-题目.txt
+# 依赖管理 (如果使用 pip freeze > requirements.txt，可能不需要忽略)
+# requirements.txt
+
+# 脚本文件 (通常在宿主机运行)
+# debug.sh
+# push_updates.sh
+# setup.py # setup.py 通常需要版本控制，如果您的 setup.py 只是临时脚本则忽略
+
+# 文档 (根据需要调整)
+# docs/
+# *.md # 如果 README.md 需要保留，则不要忽略 *.md
+
+# 测试相关
+coverage.xml
+htmlcov/
+.coverage
 

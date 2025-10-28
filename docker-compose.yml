@@ -1,30 +1,28 @@
-# version: '3.8' # 已移除
+# version: '3.8' # 版本号在新版 Docker Compose 中不是必需的
 
 services:
   game_assistant:
-    build: .
+    # 拉取您在 Docker Hub 上的镜像
+    image: lostme01/api-xiuxian:latest # 确保这是您正确的镜像名称和标签
     container_name: game_assistant
     restart: unless-stopped
-    
+
     volumes:
-      # 1. 挂载 config.yaml (不变)
-      - ./config.yaml:/app/config.yaml
-      
-      # --- (修改点: 分别映射 logs 和 data) ---
-      # 2. 将宿主机的 ./logs 映射到容器的 /app/logs
+      # 配置文件挂载为只读 (ro)
+      - ./config.yaml:/app/config.yaml:ro
+      # 日志目录挂载
       - ./logs:/app/logs
-      # 3. 将宿主机的 ./data 映射到容器的 /app/data
+      # 数据目录挂载 (包含数据库和 session)
       - ./data:/app/data
-      # --- (修改结束) ---
-      
-      # 挂载宿主机时区文件 (保持)
-      - /etc/localtime:/etc/localtime:ro 
-      
+      # 宿主机时区文件挂载
+      - /etc/localtime:/etc/localtime:ro
+
+    # 使容器保持运行并允许交互式命令 (如 run)
     tty: true
     stdin_open: true
-    
+
     networks:
       - default
 
-# networks: 
-#   default:
+networks:
+  default:

@@ -1,24 +1,31 @@
 #!/bin/bash
-# 这是一个调试脚本，用于清理、重建和启动 game_assistant 容器。
+# 这是一个调试脚本，用于清理、重建和启动 game_assistant 开发环境容器。
 
 # 确保在脚本出错时立即退出
 set -e
+set -o pipefail # 如果管道中任何命令失败，则使整个管道失败
 
-# 1. 清理：停止并删除旧的容器、网络和本地构建的镜像
-echo "--- 正在停止并清理旧的容器和镜像 (docker-compose down --rmi 'local') ---"
-# 使用 --rmi 'local' 只删除 docker-compose build 构建的镜像
-docker-compose down --rmi 'local' --remove-orphans # 添加 --remove-orphans 以清理可能残留的旧容器
+# 定义 Compose 文件和服务名称
+COMPOSE_FILES="-f docker-compose.yml -f docker-compose.dev.yml"
+SERVICE_NAME="game_assistant"
 
-# 2. 重建：强制重新构建镜像，不使用缓存
-echo "--- 正在重新构建镜像 (docker-compose build --no-cache) ---"
-docker-compose build --no-cache
+echo "--- 正在停止并清理旧的开发容器和网络 ---"
+# 使用 -f 指定文件，确保停止正确的服务
+docker compose $COMPOSE_FILES down --remove-orphans
 
-# 3. 部署：在后台启动容器
-echo "--- 正在启动新容器 (docker-compose up -d) ---"
-docker-compose up -d
+# 不需要 --rmi 'local'，因为我们总是重新构建开发镜像
+# docker compose $COMPOSE_FILES down --rmi 'local' --remove-orphans
 
-# 4. 进入日志：实时跟踪容器日志 (去除前缀)
-echo "--- 正在进入实时日志 (docker-compose logs -f --no-log-prefix) ---" # 修改处
+echo "--- 正在强制重新构建开发镜像 (docker compose build --no-cache) ---"
+# 使用 -f 指定文件进行构建
+docker compose $COMPOSE_FILES build --no-cache $SERVICE_NAME
+
+echo "--- 正在启动新的开发容器 (docker compose up -d) ---"
+# 使用 -f 指定文件启动
+docker compose $COMPOSE_FILES up -d $SERVICE_NAME
+
+echo "--- 正在进入实时日志 (无前缀) ---" # 修改提示信息
 echo "--- 按 Ctrl+C 停止跟踪日志 (不会停止容器) ---"
-docker-compose logs -f --no-log-prefix # 修改处
+# 使用 -f 指定文件查看日志，并添加 --no-log-prefix 选项
+docker compose $COMPOSE_FILES logs -f --no-log-prefix $SERVICE_NAME # <-- 修改处
 

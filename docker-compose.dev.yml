@@ -1,0 +1,22 @@
+# version: '3.8' # 版本号在新版 Docker Compose 中不是必需的
+
+services:
+  game_assistant:
+    # 使用本地构建覆盖 image
+    build: .
+    # 挂载本地代码到容器，实现热更新 (除了被其他 volume 覆盖的路径)
+    volumes:
+      - ./:/app
+      # 重新声明 logs 和 data 的挂载，确保它们不会被上面的代码覆盖
+      - ./logs:/app/logs
+      - ./data:/app/data
+      # 覆盖 config.yaml 的挂载为读写 (rw)，允许本地修改和设置脚本写入
+      - ./config.yaml:/app/config.yaml:rw # 注意这里是 rw
+
+    # (可选) 如果需要调试，可以覆盖 entrypoint 或 command
+    # entrypoint: ["sleep", "infinity"] # 例如，启动一个空闲容器以便 attach
+    # command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "main.py"] # 例如，启动 debugpy
+
+    # (可选) 如果需要暴露调试端口
+    # ports:
+    #   - "5678:5678"

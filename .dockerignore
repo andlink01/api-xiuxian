@@ -1,33 +1,73 @@
-# Git
+# Git 相关文件
 .git
 .gitignore
+.gitattributes
+.github/ # 忽略 GitHub Actions 工作流目录
 
-# Docker
+# Docker 相关文件
 .dockerignore
 Dockerfile
 docker-compose.yml
+docker-build.yml # 忽略 CI 构建脚本
 
-# Python 缓存
+# Python 缓存和构建产物
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.so
+wheels/
 
 # 虚拟环境
 .venv
 venv
 env
+ENV
 
 # IDE 和系统文件
 .idea/
 .vscode/
 *.swp
 *~
+*.bak
+*.tmp
 .DS_Store
+*.sublime-project
+*.sublime-workspace
 
-# 持久化数据 (不应被构建到镜像中)
+# 持久化数据和敏感配置 (这些应该通过 Volume 挂载)
 data/
 logs/
-
-# 配置文件 (应通过卷挂载，而不是构建)
 config.yaml
+# .env* # 如果使用
+
+# 文档文件
+*.md
+docs/
+*.doc
+*.docx
+*.pdf
+
+# Shell 脚本 (通常不需要在镜像内)
+# *.sh # entrypoint.sh 需要，所以注释掉或删除
+
+# 测试文件和代码覆盖率报告
+test/
+tests/
+coverage.xml
+htmlcov/
+.coverage
+test_auth.txt # 测试文件
+
+# 依赖文件 (在多阶段构建中通常不需要复制到最终镜像)
+# requirements.txt # <-- 注释掉或者删除这一行，确保 builder 阶段能复制
+
+# 其他操作系统文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
