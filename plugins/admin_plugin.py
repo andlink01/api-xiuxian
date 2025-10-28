@@ -10,6 +10,8 @@ from pyrogram.enums import ChatType
 import asyncio
 import os
 from typing import Optional # 引入 Optional
+# 移除 string 导入
+# import string
 
 # 导入功能
 try: from plugins.character_sync_plugin import trigger_character_sync
@@ -106,6 +108,10 @@ class Plugin(BasePlugin):
         if not self.telegram_client_instance:
              self.error("初始化时无法获取 TelegramClient 实例！编辑/回复/发送功能可能受限。")
         self.info("管理插件 (入口) 已加载。")
+        # --- 移除: 不再需要允许的前缀列表 ---
+        # self.allowed_prefixes = string.punctuation
+        # --- 移除结束 ---
+
 
     def register(self):
         self.event_bus.on("admin_command_received", self.handle_admin_command)
@@ -128,40 +134,30 @@ class Plugin(BasePlugin):
             if mention and mention in command_text:
                 should_process = True; command_text = command_text.replace(mention, "", 1).strip()
         elif is_private: should_process = True
-        # --- 修改: 移除对 "收货" 的特殊处理，因为它现在和其他命令一样用逗号 ---
-        # if not should_process and is_control_group and (command_text.lower().startswith("收货") or command_text.lower().startswith("发送")):
-        #     should_process = True
-        # --- 修改结束 ---
         if not should_process: return
 
-        # --- 修改: 统一处理逗号/斜杠前缀 ---
-        if command_text.startswith(',') or command_text.startswith('/'):
+        # --- 修改: 严格检查逗号前缀 ---
+        detected_prefix = None
+        if command_text and command_text.startswith(','): # 只检查逗号
+            detected_prefix = ','
             command_parts = command_text[1:].split(maxsplit=1)
-            if not command_parts: return
+            if not command_parts: return # 只有前缀，没有命令
             command = command_parts[0].lower() # 命令转小写
             args = command_parts[1].strip() if len(command_parts) > 1 else None
-        # --- 移除旧的 "收货"/"发送" 无前缀处理逻辑 ---
-        # elif command_text.lower().startswith("收货") or command_text.lower().startswith("发送"):
-        #      command_parts = command_text.split(maxsplit=1)
-        #      command = command_parts[0].lower(); args = command_parts[1].strip() if len(command_parts) > 1 else None
-        #      self.info(f"检测到直接使用 '{command}' 指令...")
         # --- 修改结束 ---
-        else: return # 如果没有逗号/斜杠前缀，则忽略
+        else: return # 如果没有逗号前缀，则忽略
 
         if command is None: return
-        self.info(f"处理管理员指令: '{command}' (来自收藏夹: {is_saved_message}) (参数: {args})")
+        self.info(f"处理管理员指令 (前缀: '{detected_prefix}'): '{command}' (来自收藏夹: {is_saved_message}) (参数: {args})")
 
         edit_target_id = None
+        # ... (后续处理逻辑保持不变) ...
         fast_view_commands_no_args = ["帮助", "配置", "日志级别", "插件", "清除状态"]
         always_direct_reply_commands = ["菜单", "查询角色", "查询背包", "查询商店", "已学配方", "缓存状态", "任务列表"]
         should_send_processing = True
         if command in always_direct_reply_commands: should_send_processing = False
         elif command in fast_view_commands_no_args and args is None: should_send_processing = False
-        # --- 修改: 移除对 "收货" 的特殊处理 ---
-        # elif command in ["发送", "收货"]: should_send_processing = False
-        elif command == "发送": should_send_processing = False # 发送仍然不需要处理中
-        # --- 修改结束 ---
-
+        elif command == "发送": should_send_processing = False
 
         if should_send_processing:
             if is_control_group or (is_private and not is_saved_message):
@@ -171,8 +167,17 @@ class Plugin(BasePlugin):
                  status_msg = await self._send_status_message(message, f"⏳ 正在处理配方更新...")
                  edit_target_id = status_msg.id if status_msg else None
 
-        # --- 指令分发 ---
-        if command == "菜单": await self._command_menu(message, edit_target_id=edit_target_id)
+        # --- 指令分发 (仅显示相关部分) ---
+        if command == "清除状态":
+             if not args:
+                 clear_help = HELP_DETAILS.get("清除状态", "用法: ,清除状态 <类型>")
+                 if "可选类型:" not in clear_help:
+                      clear_help += "\n(可选类型: 药园锁, 闭关等待, 传功锁, 传功占位符, 交易订单锁)"
+                 await self._edit_or_reply(message.chat.id, edit_target_id, clear_help, original_message=message)
+                 return
+             await self._command_clear_state(message, args, edit_target_id)
+        # ... (其他指令处理保持不变) ...
+        elif command == "菜单": await self._command_menu(message, edit_target_id=edit_target_id)
         elif command == "帮助":
             if not args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("帮助", "用法: ,帮助 <指令名>"), original_message=message); return
             await self._command_help(message, args, edit_target_id=edit_target_id)
@@ -191,20 +196,13 @@ class Plugin(BasePlugin):
         elif command == "发送":
              full_args = None; cmd_prefix_len = 0
              if raw_text:
-                 if raw_text.startswith(',') or raw_text.startswith('/'): prefix_to_check = raw_text[0] + command
-                 else: prefix_to_check = command # 理论上不会走到这里，因为前面检查了前缀
-                 if raw_text.lower().startswith(prefix_to_check.lower()):
+                 if raw_text.startswith(','): prefix_to_check = ',' + command # 显式检查逗号
+                 else: prefix_to_check = None # 其他前缀不处理
+                 if prefix_to_check and raw_text.lower().startswith(prefix_to_check.lower()):
                      cmd_prefix_len = len(prefix_to_check)
                      full_args = raw_text[cmd_prefix_len:].strip()
              if not full_args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("发送", "用法: ,发送 <游戏指令>"), original_message=message); return
              await self._command_send_game_cmd(message, full_args)
-        # --- 修改: 移除 elif command == "收货": 块 ---
-        # elif command == "收货":
-        #      # 这个块是导致无限循环的原因，应该移除
-        #      # marketplace_transfer_plugin 会监听 admin_command_received 事件并处理
-        #      # await self.event_bus.emit("admin_command_received", message, my_username) # 移除此行
-        #      pass # admin_plugin 不需要为 收货 做任何特殊分发
-        # --- 修改结束 ---
         elif command == "智能炼制":
             if not args: await self._edit_or_reply(message.chat.id, edit_target_id, HELP_DETAILS.get("智能炼制"), original_message=message); return
             item_name = args.strip(); quantity = 1
@@ -230,11 +228,9 @@ class Plugin(BasePlugin):
                  overwrite_match = re.search(r"(--overwrite)\s*$", args or "", re.IGNORECASE)
                  if overwrite_match: overwrite_flag = True; args_cleaned = (args or "")[:overwrite_match.start()].strip()
                  else: args_cleaned = args or ""
-                 cmd_prefix_len = 0; prefix = None
-                 if raw_text:
-                     if raw_text.startswith(','): prefix = ',' + command
-                     elif raw_text.startswith('/'): prefix = '/' + command
-                     if prefix: cmd_prefix_len = len(prefix)
+                 cmd_prefix_len = 0; prefix = ',' + command # 只认逗号
+                 if raw_text and raw_text.startswith(prefix): cmd_prefix_len = len(prefix)
+
                  if cmd_prefix_len > 0:
                       recipe_text_raw = raw_text[cmd_prefix_len:].strip()
                       if overwrite_flag: recipe_text_to_pass = re.sub(r"\s*--overwrite\s*$", "", recipe_text_raw, flags=re.IGNORECASE).strip()
@@ -275,25 +271,11 @@ class Plugin(BasePlugin):
         elif command == "配置": await self.event_bus.emit("system_config_command", message, args, edit_target_id)
         elif command == "日志": await self.event_bus.emit("system_log_command", message, args, edit_target_id)
         elif command == "日志级别": await self.event_bus.emit("system_loglevel_command", message, args, edit_target_id)
-        elif command == "清除状态":
-             if not args:
-                 clear_help = HELP_DETAILS.get("清除状态", "用法: ,清除状态 <类型>")
-                 if "可选类型:" not in clear_help:
-                      clear_help += "\n(可选类型: 药园锁, 闭关等待, 传功锁, 传功占位符, 交易订单锁)"
-                 await self._edit_or_reply(message.chat.id, edit_target_id, clear_help, original_message=message)
-                 return
-             await self._command_clear_state(message, args, edit_target_id)
         else:
-             # 如果走到这里，说明是逗号/斜杠开头的未知指令
-             # 或者是非逗号/斜杠开头且非 "收货"/"发送" (根据修改后的逻辑)
-             # 对于 `,收货`，如果没有插件处理，也会走到这里
-             # 检查 marketplace_transfer_plugin 是否加载
              mtp_loaded = self.context.plugin_statuses.get("marketplace_transfer_plugin") == "enabled"
              if command == "收货" and not mtp_loaded:
                  reply_text = f"⚠️ 指令 `{command}` 需要 `marketplace_transfer_plugin` 插件，但该插件未加载或未启用。"
              else:
-                 # 对于其他未知指令，或者 `收货` 在插件加载时，暂时不回复未知指令
-                 # reply_text = f"❓ 未知指令: `{command}`\n请发送 `,菜单` 查看可用指令。"
                  self.debug(f"未找到指令 '{command}' 的处理程序，忽略。") # 记录日志但不回复
                  return # 直接返回，不发送 "未知指令"
              await self._edit_or_reply(message.chat.id, edit_target_id, reply_text, original_message=message)

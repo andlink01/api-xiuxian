@@ -13,6 +13,7 @@ from plugins.constants import ( # 导入 Redis Key 常量
 from plugins.character_sync_plugin import parse_iso_datetime, format_local_time
 # 从 collections 导入 defaultdict
 from collections import defaultdict
+import copy # 导入 copy 模块
 
 logger = logging.getLogger("GameDataManager")
 
@@ -76,19 +77,12 @@ class GameDataManager:
             now_aware_dt = datetime.now().astimezone()
             now_aware_str = now_aware_dt.strftime("%Y-%m-%d %H:%M:%S %Z%z")
 
-            # --- 修改: 从配置读取 TTL，提供默认值 ---
-            # 定义默认 TTL (秒)
             DEFAULT_TTL = {
-                'status': 360,     # 6 分钟
-                'inventory': 1200, # 20 分钟
-                'sect': 3600,      # 1 小时
-                'garden': 360,     # 6 分钟
-                'pagoda': 86400,   # 24 小时
-                'recipes': 43200,  # 12 小时
+                'status': 360, 'inventory': 1200, 'sect': 3600, 'garden': 360,
+                'pagoda': 86400, 'recipes': 43200,
             }
-            # 从配置读取 TTL，若无则使用默认值
             def get_ttl(key_type: str) -> int:
-                return self.config.get(f"cache_ttl.{key_type}", DEFAULT_TTL.get(key_type, 600)) # 默认为10分钟
+                return self.config.get(f"cache_ttl.{key_type}", DEFAULT_TTL.get(key_type, 600))
 
             status_ttl = get_ttl('status')
             inv_ttl = get_ttl('inventory')
@@ -96,15 +90,11 @@ class GameDataManager:
             garden_ttl = get_ttl('garden')
             pagoda_ttl = get_ttl('pagoda')
             recipes_ttl = get_ttl('recipes')
-            # --- 修改结束 ---
 
-
-            # 使用 Pipeline 批量写入 Redis
             async with redis_client.pipeline(transaction=False) as pipe:
-                executed_pipe = False # 标记是否执行了 pipeline
+                executed_pipe = False
 
                 # --- 1. 处理角色核心状态 ---
-                # (数据提取和格式化逻辑不变)
                 status_data = {
                     "_internal_last_updated": now_aware_str, "telegram_id": raw_data.get("telegram_id"),
                     "username": raw_data.get("username"), "dao_name": raw_data.get("dao_name"),
@@ -123,52 +113,66 @@ class GameDataManager:
                     "last_treasure_hunt_time": raw_data.get("last_treasure_hunt_time"),
                     "force_seclusion_cooldown_until": raw_data.get("force_seclusion_cooldown_until"),
                     "last_elixir_time": raw_data.get("last_elixir_time"), "last_bet_date": raw_data.get("last_bet_date"),
-                    # --- 从根级别获取药园和闯塔数据 ---
-                    "herb_garden": None, # 初始化为 None
-                    "pagoda_progress": None, # 初始化为 None
+                    "herb_garden": None, "pagoda_progress": None,
                 }
                 # 处理嵌套 JSON 和时间格式化
-                for field_name in ["active_formation", "active_yindao_buff", "herb_garden", "pagoda_progress"]: # 加入药园和闯塔
+                for field_name in ["active_formation", "active_yindao_buff", "herb_garden", "pagoda_progress"]:
                     field_str = raw_data.get(field_name); field_data = None
                     if isinstance(field_str, str):
                         try: field_data = json.loads(field_str)
                         except: logger.warning(f"解析字段 '{field_name}' 的 JSON 字符串失败。")
                     elif isinstance(field_str, dict): field_data = field_str
+
+                    # --- 修改: 使用 copy.deepcopy 确保 field_data 独立 ---
                     if isinstance(field_data, dict):
-                         status_data[field_name] = field_data # 存入解析后的字典
-                         # 特殊处理药园地块时间
-                         if field_name == "herb_garden" and isinstance(field_data.get("plots"), dict):
-                              for plot_id, plot_info in field_data["plots"].items():
+                        # 使用深拷贝，避免后续修改影响原始 raw_data (如果 field_str 本身就是 dict)
+                        # 或者避免修改 status_data 影响到其他地方对 field_data 的引用
+                        status_data[field_name] = copy.deepcopy(field_data)
+                        current_field_dict = status_data[field_name] # 操作 status_data 中的副本
+
+                        # 特殊处理药园地块时间
+                        if field_name == "herb_garden" and isinstance(current_field_dict.get("plots"), dict):
+                              # --- 修改: 迭代 plots 的副本 ---
+                              for plot_id, plot_info in list(current_field_dict["plots"].items()): # 迭代副本
                                   if isinstance(plot_info, dict) and plot_info.get("plant_time"):
-                                      parsed_dt_p = parse_iso_datetime(plot_info["plant_time"]); plot_info["plant_time_formatted"] = format_local_time(parsed_dt_p)
-                         # 处理其他嵌套字典中的时间
-                         for key, value in field_data.items():
+                                      parsed_dt_p = parse_iso_datetime(plot_info["plant_time"])
+                                      # 直接在 current_field_dict (即 status_data[field_name]) 中添加新键
+                                      current_field_dict["plots"][plot_id]["plant_time_formatted"] = format_local_time(parsed_dt_p)
+                              # --- 修改结束 ---
+
+                        # --- 修改: 迭代 current_field_dict.items() 的副本 ---
+                        # 处理其他嵌套字典中的时间
+                        for key, value in list(current_field_dict.items()): # 迭代副本
                              if isinstance(value, str) and ("_time" in key or "_until" in key or key == "expiry"):
                                   parsed_dt_inner = parse_iso_datetime(value)
-                                  if parsed_dt_inner: status_data[field_name][key + "_formatted"] = format_local_time(parsed_dt_inner)
-                    # 如果字段值为 null 或解析失败，status_data 中对应的值保持 None 或初始值
-                # 格式化顶层时间戳
+                                  if parsed_dt_inner:
+                                      # 直接在 current_field_dict 中添加新键
+                                      current_field_dict[key + "_formatted"] = format_local_time(parsed_dt_inner)
+                        # --- 修改结束 ---
+                    # --- 修改结束 ---
+
+
+                # 格式化顶层时间戳 (逻辑不变)
                 time_keys_to_format = ["cultivation_cooldown_until", "deep_seclusion_start_time", "deep_seclusion_end_time", "last_yindao_time", "last_battle_time", "last_dummy_practice_time", "last_dungeon_time", "last_trial_time", "last_treasure_hunt_time", "force_seclusion_cooldown_until", "last_elixir_time"]
                 for key in time_keys_to_format:
                     if status_data.get(key):
                         parsed_dt = parse_iso_datetime(status_data[key]); status_data[key + "_formatted"] = format_local_time(parsed_dt)
 
                 status_key = CHAR_STATUS_KEY.format(user_id)
-                pipe.set(status_key, json.dumps(status_data, ensure_ascii=False), ex=status_ttl) # 使用配置的 TTL
+                pipe.set(status_key, json.dumps(status_data, ensure_ascii=False), ex=status_ttl)
                 logger.debug(f"【数据管理器】准备更新 {status_key} (TTL: ~{status_ttl}s)")
                 executed_pipe = True
 
-                # --- 2. 处理背包数据 ---
+                # --- 2. 处理背包数据 (逻辑不变) ---
                 inventory_data_processed = await self._process_inventory_data(raw_data.get("inventory"), now_aware_str)
                 if inventory_data_processed:
                     inv_key = CHAR_INVENTORY_KEY.format(user_id)
-                    pipe.set(inv_key, json.dumps(inventory_data_processed, ensure_ascii=False), ex=inv_ttl) # 使用配置的 TTL
+                    pipe.set(inv_key, json.dumps(inventory_data_processed, ensure_ascii=False), ex=inv_ttl)
                     logger.debug(f"【数据管理器】准备更新 {inv_key} (TTL: ~{inv_ttl}s)")
                     executed_pipe = True
                 else: logger.warning("【数据管理器】API 返回的背包数据为空或处理失败，未更新背包缓存。")
 
-                # --- 3. 处理宗门信息 ---
-                # (数据提取和格式化逻辑不变)
+                # --- 3. 处理宗门信息 (逻辑不变) ---
                 sect_data = {
                     "_internal_last_updated": now_aware_str, "sect_name": raw_data.get("sect_name"), "sect_id": raw_data.get("sect_id"),
                     "sect_contribution": raw_data.get("sect_contribution"), "is_sect_elder": raw_data.get("is_sect_elder"),
@@ -180,22 +184,21 @@ class GameDataManager:
                 if sect_data.get("sect_leave_cooldown_until"):
                      parsed_dt_s = parse_iso_datetime(sect_data["sect_leave_cooldown_until"]); sect_data["sect_leave_cooldown_until_formatted"] = format_local_time(parsed_dt_s)
                 sect_key = CHAR_SECT_KEY.format(user_id)
-                pipe.set(sect_key, json.dumps(sect_data, ensure_ascii=False), ex=sect_ttl) # 使用配置的 TTL
+                pipe.set(sect_key, json.dumps(sect_data, ensure_ascii=False), ex=sect_ttl)
                 logger.debug(f"【数据管理器】准备更新 {sect_key} (TTL: ~{sect_ttl}s)")
                 executed_pipe = True
 
-                # --- 4. 处理药园数据 (现在已包含在 status_data 中，但为保持独立缓存，单独写入) ---
-                if status_data["herb_garden"]: # 检查是否成功解析
+                # --- 4. 处理药园数据 (逻辑不变, 使用 status_data 处理后的结果) ---
+                if status_data["herb_garden"]:
                      garden_data_to_store = { "_internal_last_updated": now_aware_str, **status_data["herb_garden"] }
                      garden_key = CHAR_GARDEN_KEY.format(user_id)
-                     pipe.set(garden_key, json.dumps(garden_data_to_store, ensure_ascii=False), ex=garden_ttl) # 使用配置的 TTL
+                     pipe.set(garden_key, json.dumps(garden_data_to_store, ensure_ascii=False), ex=garden_ttl)
                      logger.debug(f"【数据管理器】准备更新 {garden_key} (TTL: ~{garden_ttl}s)")
                      executed_pipe = True
                 else: logger.warning("【数据管理器】API 未返回药园数据或解析失败，未更新药园缓存。")
 
-                # --- 5. 处理闯塔数据 (现在已包含在 status_data 中，但为保持独立缓存，单独写入) ---
-                if status_data["pagoda_progress"]: # 检查是否成功解析
-                     # 整合其他闯塔相关字段
+                # --- 5. 处理闯塔数据 (逻辑不变, 使用 status_data 处理后的结果) ---
+                if status_data["pagoda_progress"]:
                      pagoda_data_to_store = {
                          "_internal_last_updated": now_aware_str,
                          "progress": status_data["pagoda_progress"], # 解析后的字典
@@ -204,12 +207,12 @@ class GameDataManager:
                          "claimed_floors_str": raw_data.get("pagoda_claimed_floors") # 原始字符串
                      }
                      pagoda_key = CHAR_PAGODA_KEY.format(user_id)
-                     pipe.set(pagoda_key, json.dumps(pagoda_data_to_store, ensure_ascii=False), ex=pagoda_ttl) # 使用配置的 TTL
+                     pipe.set(pagoda_key, json.dumps(pagoda_data_to_store, ensure_ascii=False), ex=pagoda_ttl)
                      logger.debug(f"【数据管理器】准备更新 {pagoda_key} (TTL: ~{pagoda_ttl}s)")
                      executed_pipe = True
                 else: logger.warning("【数据管理器】API 未返回闯塔进度数据或解析失败，未更新闯塔缓存。")
 
-                # --- 6. 处理已学配方 ---
+                # --- 6. 处理已学配方 (逻辑不变) ---
                 recipes_str = raw_data.get("recipes_known"); recipes_list_processed = None
                 if isinstance(recipes_str, str):
                     try: recipes_list_processed = json.loads(recipes_str)
@@ -218,7 +221,7 @@ class GameDataManager:
                 if isinstance(recipes_list_processed, list):
                      recipes_data_to_store = { "_internal_last_updated": now_aware_str, "known_ids": recipes_list_processed }
                      recipes_key = CHAR_RECIPES_KEY.format(user_id)
-                     pipe.set(recipes_key, json.dumps(recipes_data_to_store, ensure_ascii=False), ex=recipes_ttl) # 使用配置的 TTL
+                     pipe.set(recipes_key, json.dumps(recipes_data_to_store, ensure_ascii=False), ex=recipes_ttl)
                      logger.debug(f"【数据管理器】准备更新 {recipes_key} (TTL: ~{recipes_ttl}s)")
                      executed_pipe = True
                 else: logger.warning("【数据管理器】API 未返回已学配方数据或解析失败，未更新配方缓存。")
@@ -236,13 +239,13 @@ class GameDataManager:
             logger.error(f"【数据管理器】内部更新缓存时发生意外错误: {e}", exc_info=True)
             return False
 
+    # ... (update_cache_from_api, _process_inventory_data, update_item_master_cache, update_shop_cache 保持不变) ...
     async def update_cache_from_api(self, user_id: int, username: str) -> bool:
         """【公开】调用 /api/cultivator 并更新缓存"""
         return await self._update_cache_from_api_internal(user_id, username)
 
     async def _process_inventory_data(self, inventory_data: Optional[Dict], updated_time_str: str) -> Optional[Dict]:
         """【内部】处理来自 API 的 inventory 字典"""
-        # (此函数逻辑不变)
         if not inventory_data or not isinstance(inventory_data, dict): return None
         logger.debug("【数据管理器】开始处理背包数据...")
         item_master_data = await self.get_item_master_data(use_cache=True)
@@ -277,7 +280,6 @@ class GameDataManager:
         logger.debug(f"【数据管理器】背包数据处理完成，共 {total_items_count} 种物品。")
         return full_inventory_data
 
-
     async def update_item_master_cache(self) -> bool:
         """【公开】调用 /api/all_items 并更新 game:items:master 缓存"""
         logger.info("【数据管理器】开始更新全局物品主数据缓存...")
@@ -296,9 +298,7 @@ class GameDataManager:
                 else: logger.warning(f"【数据管理器】跳过格式不正确的物品主数据条目: {item}")
             now_aware_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z%z")
             data_to_store = {"_internal_last_updated": now_aware_str, "items": items_dict}
-            # --- 修改: 从配置读取 TTL ---
-            ttl_seconds = self.config.get("cache_ttl.item_master", 90000) # 默认 25 小时
-            # --- 修改结束 ---
+            ttl_seconds = self.config.get("cache_ttl.item_master", 90000)
             await redis_client.set(GAME_ITEMS_MASTER_KEY, json.dumps(data_to_store, ensure_ascii=False), ex=ttl_seconds)
             logger.info(f"【数据管理器】全局物品主数据已更新到 Redis ({parsed_count} 条)，Key: {GAME_ITEMS_MASTER_KEY} (TTL: ~{ttl_seconds}s)")
             self._item_master_cache = items_dict # 更新内存缓存
@@ -327,9 +327,7 @@ class GameDataManager:
             now_aware_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z%z")
             data_to_store = {"_internal_last_updated": now_aware_str, "items": shop_items_dict}
             shop_key = GAME_SHOP_KEY.format(user_id)
-            # --- 修改: 从配置读取 TTL ---
-            ttl_seconds = self.config.get("cache_ttl.shop", 90000) # 默认 25 小时
-            # --- 修改结束 ---
+            ttl_seconds = self.config.get("cache_ttl.shop", 90000)
             await redis_client.set(shop_key, json.dumps(data_to_store, ensure_ascii=False), ex=ttl_seconds)
             logger.info(f"【数据管理器】用户 {user_id} 的商店数据已更新到 Redis ({parsed_count} 条)，Key: {shop_key} (TTL: ~{ttl_seconds}s)")
             return True
@@ -341,15 +339,16 @@ class GameDataManager:
 
     async def _get_cache_data(self, key: str) -> Optional[Tuple[Any, Optional[int], Optional[str]]]:
         """【内部】读取指定 key 的缓存数据、TTL 和更新时间"""
+        # ... (逻辑不变) ...
         redis_client = await self._get_redis_client()
-        if not redis_client: return None
+        if not redis_client: return None, None, None # 返回三元组以匹配类型提示
         try:
             async with redis_client.pipeline(transaction=False) as pipe:
                 pipe.get(key)
                 pipe.ttl(key)
                 results = await pipe.execute()
             data_json = results[0]
-            ttl = results[1] if isinstance(results[1], int) and results[1] >= 0 else None
+            ttl = results[1] if isinstance(results[1], int) and results[1] >= 0 else (None if results[1] == -2 else -1) # 区分不存在 (-2) 和无 TTL (-1)
 
             if data_json:
                 data = json.loads(data_json)
@@ -361,32 +360,33 @@ class GameDataManager:
                 return data, ttl, last_updated
             else:
                 logger.debug(f"【数据管理器】缓存未命中: Key '{key}'")
-                return None, ttl, None # 返回 None 数据，但可能返回 TTL (如果是刚过期)
+                return None, ttl, None # 返回 None 数据
         except json.JSONDecodeError:
             logger.error(f"【数据管理器】解析 Redis Key '{key}' 的 JSON 失败。"); return None, None, None
         except Exception as e:
             logger.error(f"【数据管理器】读取 Redis Key '{key}' 时出错: {e}"); return None, None, None
 
+
     async def _get_data_generic(self, user_id: int, key_template: str, data_key_in_cache: Optional[str] = None, use_cache: bool = True):
         """通用获取缓存或实时数据的内部方法"""
+        # ... (逻辑不变) ...
         key = key_template.format(user_id)
         result_data = None
 
         if use_cache:
             cache_result = await self._get_cache_data(key)
-            if cache_result and cache_result[0] is not None: # 检查数据是否为 None
+            # cache_result 是 (data, ttl, last_updated)
+            if cache_result and cache_result[0] is not None:
                 data = cache_result[0]
                 if data_key_in_cache and isinstance(data, dict):
                     result_data = data.get(data_key_in_cache)
                 else:
                     result_data = data
                 logger.debug(f"缓存命中 {key}")
-                return result_data # 从缓存返回
+                return result_data
             else:
                 logger.info(f"缓存未命中或数据为空 {key}，将尝试强制刷新...")
-                # 缓存未命中，自动触发刷新 (use_cache=False 逻辑)
 
-        # 执行强制刷新 (use_cache=False 或缓存未命中时)
         logger.info(f"强制刷新缓存 {key}...")
         username = self.context.telegram_client._my_username if self.context.telegram_client else None
         if not username:
@@ -394,7 +394,6 @@ class GameDataManager:
             return None
 
         if await self._update_cache_from_api_internal(user_id, username):
-            # 刷新成功后，再次尝试读取缓存
             result_after_update = await self._get_cache_data(key)
             if result_after_update and result_after_update[0] is not None:
                 data_after = result_after_update[0]
@@ -409,9 +408,9 @@ class GameDataManager:
                 return None
         else:
             logger.error(f"强制刷新缓存 {key} 失败。")
-            return None # 刷新失败
+            return None
 
-    # --- 具体数据类型的获取方法 ---
+    # --- 具体数据类型的获取方法 (保持不变) ---
     async def get_character_status(self, user_id: int, use_cache: bool = True) -> Optional[Dict]:
         return await self._get_data_generic(user_id, CHAR_STATUS_KEY, use_cache=use_cache)
 
@@ -421,7 +420,6 @@ class GameDataManager:
     async def get_sect_info(self, user_id: int, use_cache: bool = True) -> Optional[Dict]:
         return await self._get_data_generic(user_id, CHAR_SECT_KEY, use_cache=use_cache)
 
-    # --- 注意: 药园和闯塔现在属于 status 一部分，但仍提供独立获取方法读取独立缓存 ---
     async def get_herb_garden(self, user_id: int, use_cache: bool = True) -> Optional[Dict]:
         """获取独立的药园缓存"""
         return await self._get_data_generic(user_id, CHAR_GARDEN_KEY, use_cache=use_cache)
@@ -429,7 +427,6 @@ class GameDataManager:
     async def get_pagoda_progress(self, user_id: int, use_cache: bool = True) -> Optional[Dict]:
         """获取独立的闯塔缓存 (包含 progress, failed_floor 等)"""
         return await self._get_data_generic(user_id, CHAR_PAGODA_KEY, use_cache=use_cache)
-    # ---
 
     async def get_learned_recipes(self, user_id: int, use_cache: bool = True) -> Optional[List[str]]:
         """获取已学配方 ID 列表"""
@@ -437,6 +434,7 @@ class GameDataManager:
 
     async def get_item_master_data(self, use_cache: bool = True) -> Optional[Dict]:
         """获取物品主数据 {item_id: {name, type}}"""
+        # ... (逻辑不变) ...
         if use_cache and self._item_master_cache:
             logger.debug("命中物品主数据内存缓存。")
             return self._item_master_cache
@@ -450,22 +448,21 @@ class GameDataManager:
                       logger.debug("命中物品主数据 Redis 缓存，更新内存缓存。")
                       self._item_master_cache = items_data; return items_data
                  else: logger.error("物品主数据 Redis 缓存内部格式错误。")
-            # 缓存未命中或格式错误，触发刷新
             logger.warning("物品主数据缓存未命中或格式错误，尝试强制刷新...")
-            # 注意: 这里不应死循环，刷新失败直接返回 None
             if await self.update_item_master_cache():
-                 return self._item_master_cache # 返回更新后的内存缓存
+                 return self._item_master_cache
             else:
                  return None
         else: # use_cache = False
             logger.info("强制刷新物品主数据缓存...")
             if await self.update_item_master_cache():
-                 return self._item_master_cache # 返回更新后的内存缓存
+                 return self._item_master_cache
             else:
                  return None
 
     async def get_shop_data(self, user_id: int, use_cache: bool = True) -> Optional[Dict]:
         """获取商店数据 {item_id: {details}}"""
+        # ... (逻辑不变) ...
         key = GAME_SHOP_KEY.format(user_id)
         shop_items_dict = None
         if use_cache:
@@ -475,15 +472,11 @@ class GameDataManager:
                 if isinstance(items_data, dict):
                      shop_items_dict = items_data
                      logger.debug(f"命中商店缓存 {key}")
-                     return shop_items_dict # 从缓存返回
-            # 缓存未命中或格式错误，触发刷新
+                     return shop_items_dict
             logger.info(f"商店缓存未命中或数据为空 {key}，将尝试强制刷新...")
-            # (use_cache=False 逻辑)
 
-        # 执行强制刷新 (use_cache=False 或缓存未命中时)
         logger.info(f"强制刷新商店缓存 {key}...")
         if await self.update_shop_cache(user_id):
-             # 刷新成功后，再次尝试读取缓存
              result_after_update = await self._get_cache_data(key)
              if result_after_update and result_after_update[0] is not None and isinstance(result_after_update[0], dict):
                   items_data_after = result_after_update[0].get("items")
@@ -495,9 +488,9 @@ class GameDataManager:
              return None
         else:
             logger.error(f"强制刷新商店缓存 {key} 失败。")
-            return None # 更新失败
+            return None
 
-    # --- 获取带 TTL 和更新时间的方法 ---
+    # --- 获取带 TTL 和更新时间的方法 (保持不变) ---
     async def get_cached_data_with_details(self, data_type: str, user_id: int) -> Tuple[Optional[Any], Optional[int], Optional[str]]:
         """
         获取指定类型的缓存数据及其 TTL 和上次更新时间。
@@ -505,16 +498,13 @@ class GameDataManager:
         key_map = {
             'status': CHAR_STATUS_KEY, 'inventory': CHAR_INVENTORY_KEY, 'sect': CHAR_SECT_KEY,
             'garden': CHAR_GARDEN_KEY, 'pagoda': CHAR_PAGODA_KEY, 'recipes': CHAR_RECIPES_KEY,
-            'shop': GAME_SHOP_KEY, 'item_master': GAME_ITEMS_MASTER_KEY, # 添加物品主数据
+            'shop': GAME_SHOP_KEY, 'item_master': GAME_ITEMS_MASTER_KEY,
         }
         key_template = key_map.get(data_type)
         if not key_template:
              logger.error(f"无效的数据类型 '{data_type}' 请求 get_cached_data_with_details")
              return None, None, None
-
-        # 物品主数据不包含 user_id
         key = key_template if data_type == 'item_master' else key_template.format(user_id)
-
         result = await self._get_cache_data(key)
         return result if result else (None, None, None)
 
@@ -522,7 +512,6 @@ class GameDataManager:
     async def get_my_marketplace_listings(self, user_id: int, username: str, use_cache: bool = True) -> Optional[List[Dict]]:
          # TODO: 实现缓存逻辑 (需要新的 Redis Key 和更新策略)
          logger.warning("get_my_marketplace_listings 尚未实现缓存。")
-         # 临时实现：总是实时请求
          if self.http:
              data = await self.http.get_marketplace_listings(search_term=username)
              return data.get("listings") if isinstance(data, dict) else None
