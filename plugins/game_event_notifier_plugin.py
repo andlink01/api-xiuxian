@@ -81,7 +81,16 @@ class Plugin(BasePlugin):
     async def handle_game_response(self, message: Message, is_reply_to_me: bool, is_mentioning_me: bool):
         """处理游戏机器人回复，解析并发送通知"""
         text = message.text or message.caption
-        preview = (text[:50] + '...') if text and len(text) > 50 else text
+        # --- 修改: 添加 try-except 块 ---
+        try:
+            preview = (text[:50] + '...') if text and len(text) > 50 else text
+        except UnicodeError as e:
+            self.error(f"创建日志预览时发生 Unicode 错误 (MsgID={message.id}): {e}")
+            preview = "[日志预览创建失败]"
+        except Exception as e:
+            self.error(f"创建日志预览时发生未知错误 (MsgID={message.id}): {e}", exc_info=True)
+            preview = "[日志预览创建失败]"
+        # --- 修改结束 ---
         self.debug(f"收到 game_response 事件: MsgID={message.id}, ReplyToMe={is_reply_to_me}, MentionMe={is_mentioning_me}, IsEdit={message.edit_date is not None}, Preview='{preview}'")
 
         is_duel_result = bool(REGEX_DUEL_RESULT.search(text or "")) if text else False
@@ -206,7 +215,7 @@ class Plugin(BasePlugin):
             notifications.append(f"✅ 学习配方: {recipe_name}")
         elif learn_fail_match:
             notifications.append("❌ 学习配方失败: 背包无此物")
-        
+
         # 7. 炼制
         craft_success_match = REGEX_CRAFT_SUCCESS_MULTI.search(text)
         craft_fail_material_match = REGEX_CRAFT_FAIL_MATERIAL.search(text)
@@ -356,3 +365,4 @@ class Plugin(BasePlugin):
 
             except Exception as e:
                 self.error(f"发送游戏事件通知失败: {e}", exc_info=True)
+

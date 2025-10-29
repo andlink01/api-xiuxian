@@ -24,6 +24,9 @@ CHAR_SECT_KEY = "char:sect:{}" # 宗门信息 (TTL 中/长)
 CHAR_GARDEN_KEY = "char:garden:{}" # 药园 (TTL 短)
 CHAR_PAGODA_KEY = "char:pagoda:{}" # 闯塔 (TTL 长)
 CHAR_RECIPES_KEY = "char:recipes:{}" # 已学配方 (TTL 中/长)
+# --- 新增: 观星台 Key ---
+CHAR_STAR_PLATFORM_KEY = "char:star_platform:{}" # 观星台 (TTL 短)
+# --- 新增结束 ---
 GAME_ITEMS_MASTER_KEY = "game:items:master" # 物品主数据 (TTL 长)
 GAME_SHOP_KEY = "game:shop:{}" # 商店数据 (TTL 长)
 # --- Key 定义结束 ---
@@ -79,7 +82,7 @@ class GameDataManager:
 
             DEFAULT_TTL = {
                 'status': 360, 'inventory': 1200, 'sect': 3600, 'garden': 360,
-                'pagoda': 86400, 'recipes': 43200,
+                'pagoda': 86400, 'recipes': 43200, 'star_platform': 360 # <-- 添加观星台默认 TTL
             }
             def get_ttl(key_type: str) -> int:
                 return self.config.get(f"cache_ttl.{key_type}", DEFAULT_TTL.get(key_type, 600))
@@ -90,11 +93,12 @@ class GameDataManager:
             garden_ttl = get_ttl('garden')
             pagoda_ttl = get_ttl('pagoda')
             recipes_ttl = get_ttl('recipes')
+            star_platform_ttl = get_ttl('star_platform') # <-- 获取观星台 TTL
 
             async with redis_client.pipeline(transaction=False) as pipe:
                 executed_pipe = False
 
-                # --- 1. 处理角色核心状态 ---
+                # --- 1. 处理角色核心状态 (移除 herb_garden, pagoda_progress 初始化) ---
                 status_data = {
                     "_internal_last_updated": now_aware_str, "telegram_id": raw_data.get("telegram_id"),
                     "username": raw_data.get("username"), "dao_name": raw_data.get("dao_name"),
@@ -113,51 +117,61 @@ class GameDataManager:
                     "last_treasure_hunt_time": raw_data.get("last_treasure_hunt_time"),
                     "force_seclusion_cooldown_until": raw_data.get("force_seclusion_cooldown_until"),
                     "last_elixir_time": raw_data.get("last_elixir_time"), "last_bet_date": raw_data.get("last_bet_date"),
-                    "herb_garden": None, "pagoda_progress": None, # 初始化为 None
+                    # "herb_garden": None, "pagoda_progress": None, # <--- 移除初始化
                 }
-                # 处理嵌套 JSON 和时间格式化
-                for field_name in ["active_formation", "active_yindao_buff", "herb_garden", "pagoda_progress"]:
+                # --- 处理嵌套 JSON 和时间格式化 (将 herb_garden, pagoda_progress, star_platform 移到后面单独处理) ---
+                processed_nested_data = {} # 存储解析后的嵌套数据
+                for field_name in ["active_formation", "active_yindao_buff", "herb_garden", "pagoda_progress", "star_platform"]: # <--- 添加 star_platform
                     field_str = raw_data.get(field_name); field_data = None
-                    if isinstance(field_str, str):
+                    if isinstance(field_str, str) and field_str.strip() and field_str.strip() != '{}' and field_str.strip() != '[]': # 检查非空字符串
                         try: field_data = json.loads(field_str)
-                        except: logger.warning(f"解析字段 '{field_name}' 的 JSON 字符串失败。")
+                        except json.JSONDecodeError: logger.warning(f"解析字段 '{field_name}' 的 JSON 字符串失败: {field_str[:100]}...")
                     elif isinstance(field_str, dict): field_data = field_str # 如果 API 直接返回字典
                     elif field_str is None: field_data = None # 处理 null 值
 
                     if isinstance(field_data, dict):
-                        # 使用深拷贝，确保操作的是独立的字典副本
-                        status_data[field_name] = copy.deepcopy(field_data)
-                        current_field_dict = status_data[field_name] # 操作 status_data 中的副本
+                        processed_nested_data[field_name] = copy.deepcopy(field_data)
+                        current_field_dict = processed_nested_data[field_name]
 
-                        # 特殊处理药园地块时间
+                        # 特殊处理时间
+                        # 药园地块时间
                         if field_name == "herb_garden" and isinstance(current_field_dict.get("plots"), dict):
-                              # --- 修复: 迭代 plots 的副本列表 ---
-                              for plot_id, plot_info in list(current_field_dict["plots"].items()): # 迭代副本列表
+                              for plot_id, plot_info in list(current_field_dict["plots"].items()):
                                   if isinstance(plot_info, dict) and plot_info.get("plant_time"):
                                       parsed_dt_p = parse_iso_datetime(plot_info["plant_time"])
-                                      # 直接在 current_field_dict (即 status_data[field_name]) 中添加新键
                                       current_field_dict["plots"][plot_id]["plant_time_formatted"] = format_local_time(parsed_dt_p)
-                              # --- 修复结束 ---
+                        # 观星台地块时间
+                        elif field_name == "star_platform" and isinstance(current_field_dict.get("plots"), dict):
+                            for plot_id, plot_info in list(current_field_dict["plots"].items()):
+                                if isinstance(plot_info, dict) and plot_info.get("start_time"):
+                                    parsed_dt_sp = parse_iso_datetime(plot_info["start_time"])
+                                    current_field_dict["plots"][plot_id]["start_time_formatted"] = format_local_time(parsed_dt_sp)
+                                    # 计算剩余时间 (如果需要)
+                                    # ... (可以在插件端计算) ...
 
-                        # --- 修复: 迭代 current_field_dict.items() 的副本列表 ---
                         # 处理其他嵌套字典中的时间
-                        for key, value in list(current_field_dict.items()): # 迭代副本列表
-                             if isinstance(value, str) and ("_time" in key or "_until" in key or key == "expiry" or "_date" in key): # 增加 _date 检查
+                        for key, value in list(current_field_dict.items()):
+                             if isinstance(value, str) and ("_time" in key or "_until" in key or key == "expiry" or "_date" in key):
                                   parsed_dt_inner = parse_iso_datetime(value)
                                   if parsed_dt_inner:
-                                      # 直接在 current_field_dict 中添加新键
                                       current_field_dict[key + "_formatted"] = format_local_time(parsed_dt_inner)
-                        # --- 修复结束 ---
                     elif field_data is None: # 如果 API 返回 null
-                         status_data[field_name] = None
-                    # else: field_data 解析失败或不是字典，保持 status_data[field_name] 为 None
+                         processed_nested_data[field_name] = None
+                    # else: field_data 解析失败或不是字典/列表，processed_nested_data 中无此 key
+
+                # 将需要存入 status_data 的嵌套数据加入
+                if "active_formation" in processed_nested_data:
+                    status_data["active_formation"] = processed_nested_data["active_formation"]
+                if "active_yindao_buff" in processed_nested_data:
+                    status_data["active_yindao_buff"] = processed_nested_data["active_yindao_buff"]
 
                 # 格式化顶层时间戳 (逻辑不变)
-                time_keys_to_format = ["cultivation_cooldown_until", "deep_seclusion_start_time", "deep_seclusion_end_time", "last_yindao_time", "last_battle_time", "last_dummy_practice_time", "last_dungeon_time", "last_trial_time", "last_treasure_hunt_time", "force_seclusion_cooldown_until", "last_elixir_time", "sect_leave_cooldown_until"] # 增加 sect_leave_cooldown_until
+                time_keys_to_format = ["cultivation_cooldown_until", "deep_seclusion_start_time", "deep_seclusion_end_time", "last_yindao_time", "last_battle_time", "last_dummy_practice_time", "last_dungeon_time", "last_trial_time", "last_treasure_hunt_time", "force_seclusion_cooldown_until", "last_elixir_time", "sect_leave_cooldown_until"]
                 for key in time_keys_to_format:
-                    if raw_data.get(key): # 从 raw_data 获取原始值
+                    if raw_data.get(key):
                         parsed_dt = parse_iso_datetime(raw_data[key]); status_data[key + "_formatted"] = format_local_time(parsed_dt)
-                        status_data[key] = raw_data[key] # 确保原始值也被放入 status_data
+                        # 移除原始值，只保留格式化后的？或者都保留？目前保留原始值
+                        # status_data[key] = raw_data[key]
 
                 status_key = CHAR_STATUS_KEY.format(user_id)
                 pipe.set(status_key, json.dumps(status_data, ensure_ascii=False), ex=status_ttl)
@@ -189,20 +203,20 @@ class GameDataManager:
                 logger.debug(f"【数据管理器】准备更新 {sect_key} (TTL: ~{sect_ttl}s)")
                 executed_pipe = True
 
-                # --- 4. 处理药园数据 (使用 status_data 处理后的结果) ---
-                if status_data.get("herb_garden") is not None: # 检查是否为 None
-                     garden_data_to_store = { "_internal_last_updated": now_aware_str, **status_data["herb_garden"] }
+                # --- 4. 处理药园数据 (使用 processed_nested_data) ---
+                if "herb_garden" in processed_nested_data and processed_nested_data["herb_garden"] is not None:
+                     garden_data_to_store = { "_internal_last_updated": now_aware_str, **processed_nested_data["herb_garden"] }
                      garden_key = CHAR_GARDEN_KEY.format(user_id)
                      pipe.set(garden_key, json.dumps(garden_data_to_store, ensure_ascii=False), ex=garden_ttl)
                      logger.debug(f"【数据管理器】准备更新 {garden_key} (TTL: ~{garden_ttl}s)")
                      executed_pipe = True
-                else: logger.info("【数据管理器】API 未返回药园数据或解析为 None，不更新药园缓存。")
+                else: logger.info("【数据管理器】API 未返回药园数据或解析失败/为None，不更新药园缓存。")
 
-                # --- 5. 处理闯塔数据 (使用 status_data 处理后的结果) ---
-                if status_data.get("pagoda_progress") is not None: # 检查是否为 None
+                # --- 5. 处理闯塔数据 (使用 processed_nested_data) ---
+                if "pagoda_progress" in processed_nested_data and processed_nested_data["pagoda_progress"] is not None:
                      pagoda_data_to_store = {
                          "_internal_last_updated": now_aware_str,
-                         "progress": status_data["pagoda_progress"], # 解析后的字典
+                         "progress": processed_nested_data["pagoda_progress"], # 解析后的字典
                          "failed_floor": raw_data.get("pagoda_failed_floor"),
                          "resets_today": raw_data.get("pagoda_resets_today"),
                          "claimed_floors_str": raw_data.get("pagoda_claimed_floors") # 原始字符串
@@ -219,12 +233,11 @@ class GameDataManager:
                      pipe.set(pagoda_key, json.dumps(pagoda_data_to_store, ensure_ascii=False), ex=pagoda_ttl)
                      logger.debug(f"【数据管理器】准备更新 {pagoda_key} (TTL: ~{pagoda_ttl}s)")
                      executed_pipe = True
-                else: logger.info("【数据管理器】API 未返回闯塔进度数据或解析为 None，不更新闯塔缓存。")
-
+                else: logger.info("【数据管理器】API 未返回闯塔进度数据或解析失败/为None，不更新闯塔缓存。")
 
                 # --- 6. 处理已学配方 (逻辑不变) ---
                 recipes_str = raw_data.get("recipes_known"); recipes_list_processed = None
-                if isinstance(recipes_str, str):
+                if isinstance(recipes_str, str) and recipes_str.strip() and recipes_str.strip() != '[]':
                     try: recipes_list_processed = json.loads(recipes_str)
                     except: logger.warning("解析已学配方 JSON 字符串失败。")
                 elif isinstance(recipes_str, list): recipes_list_processed = recipes_str
@@ -235,6 +248,16 @@ class GameDataManager:
                      logger.debug(f"【数据管理器】准备更新 {recipes_key} (TTL: ~{recipes_ttl}s)")
                      executed_pipe = True
                 else: logger.warning("【数据管理器】API 未返回已学配方数据或解析失败，未更新配方缓存。")
+
+                # --- 7. 处理观星台数据 (使用 processed_nested_data) ---
+                if "star_platform" in processed_nested_data and processed_nested_data["star_platform"] is not None:
+                     star_platform_data_to_store = { "_internal_last_updated": now_aware_str, **processed_nested_data["star_platform"] }
+                     star_platform_key = CHAR_STAR_PLATFORM_KEY.format(user_id)
+                     pipe.set(star_platform_key, json.dumps(star_platform_data_to_store, ensure_ascii=False), ex=star_platform_ttl)
+                     logger.debug(f"【数据管理器】准备更新 {star_platform_key} (TTL: ~{star_platform_ttl}s)")
+                     executed_pipe = True
+                else: logger.info("【数据管理器】API 未返回观星台数据或解析失败/为None，不更新观星台缓存。")
+                # --- 新增结束 ---
 
                 # --- 执行 Pipeline ---
                 if executed_pipe:
@@ -349,7 +372,6 @@ class GameDataManager:
 
     async def _get_cache_data(self, key: str) -> Optional[Tuple[Any, Optional[int], Optional[str]]]:
         """【内部】读取指定 key 的缓存数据、TTL 和更新时间"""
-        # ... (逻辑不变) ...
         redis_client = await self._get_redis_client()
         if not redis_client: return None, None, None # 返回三元组以匹配类型提示
         try:
@@ -379,7 +401,6 @@ class GameDataManager:
 
     async def _get_data_generic(self, user_id: int, key_template: str, data_key_in_cache: Optional[str] = None, use_cache: bool = True):
         """通用获取缓存或实时数据的内部方法"""
-        # ... (逻辑不变) ...
         key = key_template.format(user_id)
         result_data = None
 
@@ -438,13 +459,18 @@ class GameDataManager:
         """获取独立的闯塔缓存 (包含 progress, failed_floor 等)"""
         return await self._get_data_generic(user_id, CHAR_PAGODA_KEY, use_cache=use_cache)
 
+    # --- 新增: 获取观星台数据 ---
+    async def get_star_platform(self, user_id: int, use_cache: bool = True) -> Optional[Dict]:
+        """获取独立的观星台缓存"""
+        return await self._get_data_generic(user_id, CHAR_STAR_PLATFORM_KEY, use_cache=use_cache)
+    # --- 新增结束 ---
+
     async def get_learned_recipes(self, user_id: int, use_cache: bool = True) -> Optional[List[str]]:
         """获取已学配方 ID 列表"""
         return await self._get_data_generic(user_id, CHAR_RECIPES_KEY, data_key_in_cache="known_ids", use_cache=use_cache)
 
     async def get_item_master_data(self, use_cache: bool = True) -> Optional[Dict]:
         """获取物品主数据 {item_id: {name, type}}"""
-        # ... (逻辑不变) ...
         if use_cache and self._item_master_cache:
             logger.debug("命中物品主数据内存缓存。")
             return self._item_master_cache
@@ -472,7 +498,6 @@ class GameDataManager:
 
     async def get_shop_data(self, user_id: int, use_cache: bool = True) -> Optional[Dict]:
         """获取商店数据 {item_id: {details}}"""
-        # ... (逻辑不变) ...
         key = GAME_SHOP_KEY.format(user_id)
         shop_items_dict = None
         if use_cache:
@@ -509,6 +534,7 @@ class GameDataManager:
             'status': CHAR_STATUS_KEY, 'inventory': CHAR_INVENTORY_KEY, 'sect': CHAR_SECT_KEY,
             'garden': CHAR_GARDEN_KEY, 'pagoda': CHAR_PAGODA_KEY, 'recipes': CHAR_RECIPES_KEY,
             'shop': GAME_SHOP_KEY, 'item_master': GAME_ITEMS_MASTER_KEY,
+            'star_platform': CHAR_STAR_PLATFORM_KEY, # <-- 添加观星台映射
         }
         key_template = key_map.get(data_type)
         if not key_template:
@@ -526,4 +552,3 @@ class GameDataManager:
              data = await self.http.get_marketplace_listings(search_term=username)
              return data.get("listings") if isinstance(data, dict) else None
          return None
-

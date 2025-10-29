@@ -54,7 +54,9 @@ PLUGIN_NAME_MAP = {
     "cache_query_plugin": "缓存查询",
     "game_event_notifier_plugin": "游戏事件通知",
     "nascent_soul_plugin": "自动元婴出窍",
-    "demon_lord_event_plugin": "魔君降临", # 新增
+    "demon_lord_event_plugin": "魔君降临",
+    "recipe_sharing_plugin": "配方共享",
+    "star_platform_plugin": "自动观星台", # <-- 添加观星台插件
 }
 
 event_bus = EventBus()
@@ -63,24 +65,44 @@ sys.path.append('.')
 @asynccontextmanager
 async def lifespan(ctx: AppContext):
     logger.info("应用程序启动中...")
-    await ctx.redis.connect()
-    await ctx.http.create_session()
+    if ctx.redis: await ctx.redis.connect()
+    else: logger.error("Lifespan: RedisClient 未初始化!")
+
+    if ctx.http: await ctx.http.create_session()
+    else: logger.error("Lifespan: HTTPClient 未初始化!")
+
     logger.info("加载插件...")
     ctx.plugin_name_map = PLUGIN_NAME_MAP
     load_plugins(ctx)
     ctx.plugin_statuses = loaded_plugins_status
     logger.info("启动调度器...")
-    ctx.scheduler.start()
+    if ctx.scheduler:
+        if not ctx.scheduler.running:
+            try:
+                ctx.scheduler.start()
+            except TypeError as e:
+                if "cannot pickle" in str(e) or "cannot be serialized" in str(e):
+                     logger.error(f"启动 APScheduler 失败 (序列化错误): {e}。这通常发生在加载持久化任务时。请检查是否有插件实例方法被直接调度。", exc_info=False)
+                else:
+                     logger.error(f"启动 APScheduler 时发生意外 TypeError: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"启动 APScheduler 失败: {e}", exc_info=True)
+        else:
+            logger.warning("APScheduler 已在运行中?")
+    else: logger.error("Lifespan: Scheduler (AsyncIOScheduler instance) 未初始化!")
     logger.info("所有模块和服务已准备就绪 (除 TG 客户端连接)。")
     try: yield
     finally:
         logger.info("应用程序关闭中...")
         if ctx.http: await ctx.http.close_session()
-        if ctx.redis: await ctx.redis.close()
         if ctx.scheduler and ctx.scheduler.running:
             logger.debug("正在关闭 Scheduler...")
-            ctx.scheduler.shutdown(wait=False)
-            logger.info("Scheduler 已关闭。")
+            try:
+                ctx.scheduler.shutdown(wait=False)
+                logger.info("Scheduler 已关闭。")
+            except Exception as e:
+                logger.error(f"关闭 Scheduler 时出错: {e}")
+        if ctx.redis: await ctx.redis.close()
         logger.info("所有受 lifespan 管理的服务已安全关闭。")
 
 async def main():
@@ -101,6 +123,8 @@ async def main():
     app_context.data_manager = GameDataManager(app_context)
     logger.info("GameDataManager 已实例化并添加到 AppContext。")
 
+    telegram_client.set_redis_client(redis_client)
+
     set_global_context(app_context)
 
     try:
@@ -111,12 +135,12 @@ async def main():
              logger.critical("!!! 系统仍处于设置模式或配置文件无效。请先运行设置。")
     except (KeyboardInterrupt, SystemExit):
         logger.info("收到退出信号。")
-        if telegram_client and hasattr(telegram_client, 'app') and telegram_client.app.is_connected:
+        if telegram_client and hasattr(telegram_client, 'app') and telegram_client.app and telegram_client.app.is_connected:
              logger.info("尝试停止 Telegram 客户端...")
              await telegram_client.app.stop()
     except Exception as e:
         logger.error(f"应用程序意外崩溃: {e}", exc_info=True)
-        if telegram_client and hasattr(telegram_client, 'app') and telegram_client.app.is_connected:
+        if telegram_client and hasattr(telegram_client, 'app') and telegram_client.app and telegram_client.app.is_connected:
              logger.info("崩溃后尝试停止 Telegram 客户端...")
              try: await telegram_client.app.stop()
              except Exception as stop_e: logger.error(f"崩溃后停止 TG 客户端失败: {stop_e}")
@@ -130,4 +154,3 @@ if __name__ == "__main__":
     else:
         try: asyncio.run(main())
         except Exception as e: logger.error(f"启动过程出错: {e}", exc_info=True)
-

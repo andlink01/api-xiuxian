@@ -85,7 +85,6 @@ async def _clear_garden_state(redis_client, user_id: int, scheduler, release_loc
         if scheduler:
             # ... (移除超时任务逻辑保持不变) ...
             jobs_removed = 0
-            timeout_pattern = f"{HERB_GARDEN_TIMEOUT_JOB_ID_PREFIX}{user_id}:*"
             try:
                 matching_jobs = [job.id for job in scheduler.get_jobs() if job.id.startswith(f"{HERB_GARDEN_TIMEOUT_JOB_ID_PREFIX}{user_id}:")]
                 cleanup_logger.debug(f"找到 {len(matching_jobs)} 个匹配的超时任务: {matching_jobs}")
@@ -178,16 +177,12 @@ async def _check_herb_garden():
         task_logger.info("【自动药园】功能未启用，跳过检查。")
         return
 
-    # --- 修改: 在获取锁之前检查 my_id ---
     if not my_id:
         task_logger.warning("【自动药园】无法获取助手 User ID，任务终止。")
         return
-    # --- 修改结束 ---
 
     lock_acquired = False
-    # --- 修改: 格式化锁 Key ---
     lock_key = HERB_GARDEN_ACTION_LOCK_KEY_FORMAT.format(my_id)
-    # --- 修改结束 ---
 
     if redis_client:
         try:
@@ -201,11 +196,9 @@ async def _check_herb_garden():
             list_key = f"{HERB_GARDEN_COMMAND_LIST_KEY_PREFIX}{my_id}"
             if await redis_client.exists(list_key):
                 task_logger.info(f"【自动药园】检测到用户 {my_id} 存在未完成的操作序列，跳过本次检查。")
-                # --- 修改: 释放获取到的锁 ---
                 try: await redis_client.delete(lock_key)
                 except Exception as del_err: task_logger.warning(f"释放锁 {lock_key} 失败: {del_err}")
                 lock_acquired = False # 标记锁已释放
-                # --- 修改结束 ---
                 return
         except Exception as e:
             task_logger.error(f"【自动药园】检查或设置 Redis 锁/状态失败: {e}，为安全起见跳过本次检查。")
@@ -220,34 +213,36 @@ async def _check_herb_garden():
     commands_to_send: List[str] = []
 
     try:
-        # my_id 在前面已检查
-        task_logger.info("【自动药园】正在通过 DataManager 强制获取角色状态、宗门、背包和商店数据...")
-        # ... (数据获取逻辑不变) ...
-        char_status = await data_manager.get_character_status(my_id, use_cache=False)
+        task_logger.info("【自动药园】正在通过 DataManager 强制获取宗门、背包、商店和药园数据...")
         sect_info = await data_manager.get_sect_info(my_id, use_cache=False)
         inventory_cache = await data_manager.get_inventory(my_id, use_cache=False)
         shop_items_dict = await data_manager.get_shop_data(my_id, use_cache=False)
+        garden_data = await data_manager.get_herb_garden(my_id, use_cache=False) # <--- 改为调用 get_herb_garden
 
-        if not char_status:
-            task_logger.error("【自动药园】无法从 API 获取角色状态，任务终止。")
-            return # finally 会释放锁
+        if not sect_info:
+             task_logger.error("【自动药园】无法从 API 获取宗门信息，任务终止。")
+             return # finally 会释放锁
+        if not inventory_cache:
+             task_logger.warning("【自动药园】无法从 API 获取背包信息，可能无法判断种子数量。")
+        if not shop_items_dict:
+             task_logger.warning("【自动药园】无法从 API 获取商店信息，可能无法购买种子。")
         task_logger.info("【自动药园】获取实时数据完成。")
 
-        # ... (宗门检查、药园状态分析、指令生成逻辑不变) ...
+
         sect_name = sect_info.get("sect_name") if isinstance(sect_info, dict) else None
         if sect_name != "黄枫谷":
             task_logger.info(f"检测到宗门为 '{sect_name}' (不是黄枫谷)，功能禁用。")
             try:
-                if context.scheduler: await asyncio.to_thread(context.scheduler.remove_job, HERB_GARDEN_JOB_ID) # 使用 asyncio.to_thread
+                if context.scheduler: await asyncio.to_thread(context.scheduler.remove_job, HERB_GARDEN_JOB_ID)
                 task_logger.info("已移除自动药园定时任务。")
             except JobLookupError: task_logger.info("定时任务已不存在。")
             except Exception as e: task_logger.error(f"移除定时任务时出错: {e}")
             return # finally 会释放锁
 
-        garden_data = char_status.get("herb_garden")
         if not isinstance(garden_data, dict):
             task_logger.error("实时数据中 `herb_garden` 缺失或格式不正确，任务终止。")
             return # finally 会释放锁
+
         size = garden_data.get("size", 0); plots = garden_data.get("plots")
         empty_plots = 0; ready_plots = 0; dry_plots = 0; weed_plots = 0; pest_plots = 0; growing_plots = 0
         if isinstance(plots, dict):
@@ -356,9 +351,7 @@ async def _check_herb_garden():
                     lock_acquired = False # 锁不由 finally 块释放，由序列完成或超时释放
                 else:
                      task_logger.error(f"发送第一个指令 '{first_command}' 失败！清理状态并释放锁。")
-                     # --- 修改: 调用清理函数 ---
                      await _clear_garden_state(redis_client, my_id, context.scheduler, release_lock=True)
-                     # --- 修改结束 ---
                      lock_acquired = False
             else:
                 task_logger.error("无法启动指令序列：Redis 或 User ID 不可用。")
@@ -372,7 +365,6 @@ async def _check_herb_garden():
          lock_acquired = True # 标记需要 finally 释放
 
     finally:
-        # --- 修改: 仅在 lock_acquired 为 True 时释放锁 ---
         if lock_acquired and redis_client:
             try:
                 task_logger.info(f"【自动药园】检查结束或出错，释放 Redis 操作锁 ({lock_key})...")
@@ -387,9 +379,9 @@ async def _check_herb_garden():
                       task_logger.info(f"【自动药园】任务结束，操作锁 ({lock_key}) 由正在执行的指令序列持有。")
              except Exception as e_check:
                   task_logger.warning(f"检查指令列表是否存在时出错: {e_check}")
-        # --- 修改结束 ---
 
 
+# --- 插件类 ---
 class Plugin(BasePlugin):
     """
     自动药园管理插件（仅限黄枫谷）
@@ -462,9 +454,7 @@ class Plugin(BasePlugin):
             commands_in_list = await redis_client.lrange(list_key, 0, -1)
             if not commands_in_list or current_index >= len(commands_in_list):
                  self.warning(f"指令 '{command_text}' 发送，但 Redis 列表为空或索引 ({current_index}) 越界！清理状态。")
-                 # --- 修改: 调用清理函数 ---
                  await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                 # --- 修改结束 ---
                  return
 
             expected_command = commands_in_list[current_index]
@@ -497,24 +487,17 @@ class Plugin(BasePlugin):
                 self.info(f"已安排超时检查任务 '{timeout_job_id}'。")
             else:
                  self.error("无法安排超时任务：Scheduler 不可用。清理状态。")
-                 # --- 修改: 调用清理函数 ---
                  await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                 # --- 修改结束 ---
 
         except ValueError:
              self.error(f"Redis 中的索引 '{current_index_str}' 无效！清理状态。")
-             # --- 修改: 调用清理函数 ---
              await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-             # --- 修改结束 ---
         except Exception as e:
             self.error(f"处理指令发送事件时出错: {e}", exc_info=True)
-            # --- 修改: 调用清理函数 ---
             await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-            # --- 修改结束 ---
 
     async def handle_game_response(self, message: Message, is_reply_to_me: bool, is_mentioning_me: bool):
         """处理游戏响应，推进药园操作序列"""
-        # ... (大部分逻辑不变) ...
         if not self.config_enabled or not is_reply_to_me: return
         text = message.text or message.caption
         if not text: return
@@ -522,10 +505,12 @@ class Plugin(BasePlugin):
         redis_client = self.redis.get_client()
         if not redis_client: self.error("Redis 未连接"); return
 
+        # --- 修改: 修正 Key 名称 ---
         pending_msg_key = f"{HERB_GARDEN_PENDING_MSG_ID_KEY_PREFIX}{self._my_id}"
         pending_cmd_key = f"{HERB_GARDEN_PENDING_COMMAND_KEY_PREFIX}{self._my_id}"
         list_key = f"{HERB_GARDEN_COMMAND_LIST_KEY_PREFIX}{self._my_id}"
         index_key = f"{HERB_GARDEN_COMMAND_INDEX_KEY_PREFIX}{self._my_id}"
+        # --- 修改结束 ---
         expected_msg_id_str = None
 
         try:
@@ -537,14 +522,11 @@ class Plugin(BasePlugin):
             pending_command = await redis_client.get(pending_cmd_key)
             if not pending_command:
                 self.warning(f"匹配到 MsgID {expected_msg_id}，但无法获取等待的指令内容！清理状态。")
-                # --- 修改: 调用清理函数 ---
                 await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                # --- 修改结束 ---
                 return
 
             self.info(f"【自动药园】收到对指令 '{pending_command}' (MsgID: {expected_msg_id}) 的回复，检查结果...")
 
-            # ... (结果判断逻辑不变) ...
             is_success = False; is_no_need = False; is_fail = False; result_type = "unknown"
             command_base = pending_command.split()[0]
             keywords = GARDEN_KEYWORDS.get(command_base)
@@ -571,14 +553,11 @@ class Plugin(BasePlugin):
             except Exception as e_rem: self.warning(f"移除超时任务 '{timeout_job_id}' 失败: {e_rem}")
 
             if is_success or is_no_need:
-                # ... (推进序列逻辑不变) ...
                 current_index_str = await redis_client.get(index_key)
                 commands_in_list = await redis_client.lrange(list_key, 0, -1)
                 if current_index_str is None or not commands_in_list:
                      self.warning("无法获取指令列表或索引，序列中断。清理状态。")
-                     # --- 修改: 调用清理函数 ---
                      await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                     # --- 修改结束 ---
                      return
 
                 current_index = int(current_index_str)
@@ -591,39 +570,27 @@ class Plugin(BasePlugin):
                     success = await self.context.telegram_client.send_game_command(next_command)
                     if not success:
                          self.error(f"发送下一条指令 '{next_command}' 失败！清理状态。")
-                         # --- 修改: 调用清理函数 ---
                          await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                         # --- 修改结束 ---
                 else:
                     self.info(f"序列指令 {next_index}/{len(commands_in_list)} 全部处理完成！")
-                    # --- 修改: 调用清理函数 ---
                     await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                    # --- 修改结束 ---
                     self.info("【自动药园】序列完成后触发角色数据同步...")
                     await self.context.event_bus.emit("trigger_character_sync_now")
             elif is_fail:
                 self.error(f"指令 '{pending_command}' 执行失败！序列中断。")
-                # --- 修改: 调用清理函数 ---
                 await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                # --- 修改结束 ---
                 self.info("【自动药园】指令失败后触发角色数据同步...")
                 await self.context.event_bus.emit("trigger_character_sync_now")
             else: # 未知结果
                  self.warning(f"指令 '{pending_command}' 的回复无法判断结果 ({text[:50]}...)，序列中断。")
-                 # --- 修改: 调用清理函数 ---
                  await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-                 # --- 修改结束 ---
                  await self.context.event_bus.emit("trigger_character_sync_now")
 
         except ValueError:
             self.error(f"Redis 中的 pending MsgID '{expected_msg_id_str}' 无效！清理状态。")
-            # --- 修改: 调用清理函数 ---
             await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-            # --- 修改结束 ---
         except Exception as e:
             self.error(f"处理药园游戏响应时出错: {e}", exc_info=True)
-            # --- 修改: 调用清理函数 ---
             await _clear_garden_state(redis_client, self._my_id, self.scheduler, release_lock=True)
-            # --- 修改结束 ---
             await self.context.event_bus.emit("trigger_character_sync_now")
 

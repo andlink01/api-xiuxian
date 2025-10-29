@@ -66,12 +66,13 @@ async def get_redis_ttl_and_value(plugin: 'BasePlugin', redis_key: str) -> tuple
     else: plugin.error(f"无法访问 Redis (Key: {redis_key})：Redis 客户端不可用。")
     return ttl, value
 
-
-async def edit_or_reply(plugin: 'BasePlugin', chat_id: int, message_id: int | None, text: str, original_message: Message):
+# --- 修改: edit_or_reply 返回 Message 对象 ---
+async def edit_or_reply(plugin: 'BasePlugin', chat_id: int, message_id: int | None, text: str, original_message: Message) -> Optional[Message]:
     tg_client = plugin.context.telegram_client
+    sent_or_edited_message = None # 用于存储返回的消息对象
     if not tg_client or not tg_client.app.is_connected:
          plugin.error("无法编辑/回复：TG 客户端不可用。")
-         return
+         return None
     edited = False
     link_preview_options = LinkPreviewOptions(is_disabled=True)
     MAX_LEN = 4096
@@ -80,13 +81,18 @@ async def edit_or_reply(plugin: 'BasePlugin', chat_id: int, message_id: int | No
         text = text[:MAX_LEN - 15] + "\n...(消息过长截断)"
     if message_id:
         try:
-            await tg_client.app.edit_message_text(chat_id, message_id, text, link_preview_options=link_preview_options)
+            sent_or_edited_message = await tg_client.app.edit_message_text(chat_id, message_id, text, link_preview_options=link_preview_options)
             edited = True
         except Exception as e:
             if "MESSAGE_NOT_MODIFIED" not in str(e):
                 plugin.warning(f"编辑消息 {message_id} 失败 ({e})，尝试回复...")
                 edited = False
-            else: plugin.debug(f"消息 {message_id} 未修改。"); edited = True
+            else:
+                plugin.debug(f"消息 {message_id} 未修改。")
+                edited = True
+                # 尝试获取原始消息对象返回，虽然内容未变
+                try: sent_or_edited_message = await tg_client.app.get_messages(chat_id, message_id)
+                except: pass
     if not edited:
         if not original_message:
              plugin.error("编辑失败且无法回复：缺少原始消息对象。")
@@ -94,16 +100,19 @@ async def edit_or_reply(plugin: 'BasePlugin', chat_id: int, message_id: int | No
              if fallback_chat_id:
                  try: await tg_client.app.send_message(fallback_chat_id, f"(Edit/Reply Failed)\n{text[:1000]}...", link_preview_options=link_preview_options)
                  except Exception as final_err: plugin.critical(f"最终 fallback 发送失败: {final_err}")
-             return
+             return None
         try:
             reply_params = ReplyParameters(message_id=original_message.id)
-            await tg_client.app.send_message(chat_id, text, reply_parameters=reply_params, link_preview_options=link_preview_options)
+            sent_or_edited_message = await tg_client.app.send_message(chat_id, text, reply_parameters=reply_params, link_preview_options=link_preview_options)
         except Exception as e2:
             plugin.error(f"编辑和回复均失败: {e2}")
             fallback_chat_id = plugin.context.config.get("telegram.control_chat_id") or plugin.context.config.get("telegram.admin_id")
             if fallback_chat_id:
                 try: await tg_client.app.send_message(fallback_chat_id, f"(Edit/Reply Failed)\n{text[:1000]}...", link_preview_options=link_preview_options)
                 except Exception as final_err: plugin.critical(f"最终 fallback 发送失败: {final_err}")
+            return None
+    return sent_or_edited_message # 返回发送或编辑后的 Message 对象
+# --- 修改结束 ---
 
 
 async def send_status_message(plugin: 'BasePlugin', original_message: Message, status_text: str) -> Message | None:
