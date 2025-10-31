@@ -56,7 +56,8 @@ PLUGIN_NAME_MAP = {
     "nascent_soul_plugin": "自动元婴出窍",
     "demon_lord_event_plugin": "魔君降临",
     "recipe_sharing_plugin": "配方共享",
-    "star_platform_plugin": "自动观星台", # <-- 添加观星台插件
+    "star_platform_plugin": "自动观星台",
+    "auto_duel_plugin": "自动斗法", # <-- 新增自动斗法
 }
 
 event_bus = EventBus()

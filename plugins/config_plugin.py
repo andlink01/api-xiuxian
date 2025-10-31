@@ -25,6 +25,14 @@ try:
 except ImportError:
     CULTIVATION_JOB_ID = 'auto_cultivation_job'
     CULTIVATION_PLUGIN_LOADED = False
+# --- 新增: 导入自动斗法任务 ID ---
+try:
+    from plugins.auto_duel_plugin import AUTO_DUEL_JOB_ID
+    AUTO_DUEL_PLUGIN_LOADED = True
+except ImportError:
+    AUTO_DUEL_JOB_ID = 'auto_duel_job'
+    AUTO_DUEL_PLUGIN_LOADED = False
+# --- 新增结束 ---
 
 VALID_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -57,6 +65,12 @@ CONFIGURABLE_ITEMS = {
     "药园种子保留": ("herb_garden.min_seed_reserve", "整数", "背包中最低保留的种子数量"),
     "药园购买数量": ("herb_garden.buy_seed_quantity", "整数", "每次自动购买种子的数量"),
 
+    # --- 新增: 自动斗法 ---
+    "斗法启用": ("auto_duel.enabled", "布尔值 (开/关)", "自动斗法开关"),
+    "斗法目标": ("auto_duel.targets", "列表 (e.g., [\"@user1\"])", "自动斗法目标 (请直接修改 config.yaml)"),
+    "斗法间隔": ("auto_duel.interval_seconds", "整数 (秒)", "自动斗法间隔 (默认 305)"),
+    # --- 新增结束 ---
+    
     # 系统与其他
     "日志级别": ("logging.level", f"字符串 ({'/'.join(VALID_LOG_LEVELS)})", "主日志级别"),
     "目标用户": ("game_api.target_username", "字符串", "API 请求的目标游戏用户名 (留空则自动获取)"),
@@ -95,12 +109,21 @@ class Plugin(BasePlugin):
             if config_key_name in CONFIGURABLE_ITEMS:
                 config_path, expected_type, _ = CONFIGURABLE_ITEMS[config_key_name]
 
+                # --- 新增: 阻止通过指令修改列表 ---
+                if "列表" in expected_type and new_value_str is not None and config_key_name != "闭关延迟": # 允许修改闭关延迟
+                    reply = f"❌ 出于安全和格式考虑，列表类型 (如 **{config_key_name}**) 无法通过指令修改。\n请直接编辑 `config.yaml` 文件并重启助手。"
+                    await self._edit_or_reply(message.chat.id, edit_target_id, reply, original_message=message)
+                    return
+                # --- 新增结束 ---
+                    
                 if new_value_str is None:
                     current_value = self.config.get(config_path)
                     display_value = current_value
                     if config_key_name == "Cookie": display_value = "[已配置]" if current_value else "[未配置]"
                     elif config_key_name == "目标用户": display_value = current_value if current_value else "[自动获取]"
                     elif config_key_name == "日志级别": display_value = logging.getLevelName(logging.getLogger("GameAssistant").level)
+                    elif config_key_name == "斗法目标": display_value = f"已配置 {len(current_value)} 个" if isinstance(current_value, list) and current_value else "[未配置]"
+
 
                     reply = f"ℹ️ **配置项:** {config_key_name}\n"
                     reply += f"   **当前值:** `{display_value}`\n"
@@ -121,8 +144,9 @@ class Plugin(BasePlugin):
                     elif "整数" in expected_type:
                         new_value = int(new_value_str)
                         valid = True
-                        if (("间隔" in config_key_name or "延迟" in config_key_name or "超时" in config_key_name or "数量" in config_key_name or "保留" in config_key_name) and new_value < 0): valid = False; error_msg = "时间或数量相关的值不能为负数。"
+                        if (("间隔" in config_key_name or "延迟" in config_key_name or "超时" in config_key_name or "数量" in config_key_name or "保留" in config_key_name or "斗法间隔" in config_key_name) and new_value < 0): valid = False; error_msg = "时间或数量相关的值不能为负数。"
                         elif "间隔" in config_key_name and new_value == 0: valid = False; error_msg = "同步间隔不能为 0。"
+                        elif "斗法间隔" in config_key_name and new_value < 60: valid = False; error_msg = "斗法间隔过短，至少应为 60 秒。"
                     elif "列表" in expected_type:
                         parsed_list = literal_eval(new_value_str)
                         if isinstance(parsed_list, list) and len(parsed_list) == 2 and all(isinstance(x, (int, float)) for x in parsed_list) and parsed_list[0] <= parsed_list[1] and parsed_list[0] >= 0:
@@ -164,6 +188,10 @@ class Plugin(BasePlugin):
                             except Exception as e_level: self.error(f"运行时更新日志级别失败: {e_level}"); reply += "\n(警告: 运行时级别更新失败)"
                         elif config_path == "cultivation.auto_enabled":
                              event_name = "start_auto_cultivation" if new_value else "stop_auto_cultivation"; self.info(f"触发事件: {event_name}"); await self.event_bus.emit(event_name); reply += f"\n(已{'请求启动' if new_value else '请求停止'}自动闭关)"
+                        # --- 新增: 自动斗法 ---
+                        elif config_path == "auto_duel.enabled" or config_path == "auto_duel.interval_seconds":
+                             reply += "\n(将在下次调度器重启时生效，请重启助手或等待)" # 简单处理，重启任务比较麻烦
+                        # --- 新增结束 ---
                         elif config_path.startswith("sync_intervals.") or config_path.startswith("herb_garden.") or config_path.startswith("auto_learn_recipe.") or config_path.startswith("yindao.") or config_path.startswith("sect_teach."):
                              reply += "\n(将在下次定时任务触发或重新调度时生效)"
                         elif config_path.startswith("cultivation."): reply += "\n(将在下次调度计算或任务执行时生效)"
@@ -198,28 +226,43 @@ class Plugin(BasePlugin):
                 elif name == "目标用户": emoji = "👤"; display_value = current_value if current_value else "[自动获取]"
                 elif name == "日志级别": emoji = "📊"; display_value = logging.getLevelName(logging.getLogger("GameAssistant").level)
                 elif name == "闭关延迟": emoji = "⏳"; display_value = str(current_value)
-                elif "间隔" in name: emoji = "⏱️"; display_value = f"{current_value} 分钟"
+                elif "间隔" in name: emoji = "⏱️"; display_value = f"{current_value} {'分钟' if '分钟' in desc else '秒'}"
                 elif name == "闭关超时" or name == "闭关重试延迟" or name == "考校答题延迟" or name == "药园种子保留" or name == "药园购买数量":
                      emoji = "⏱️" if "延迟" in name or "超时" in name else ("🌱" if "种子" in name else "🔢")
                      display_value = f"{current_value} {'秒' if '秒' in desc else ('颗' if '种子' in name else '')}".strip()
                 elif name == "药园种植目标": emoji = "🎯"; display_value = current_value
+                # --- 新增: 自动斗法显示 ---
+                elif name == "斗法目标":
+                    emoji = "⚔️"
+                    if isinstance(current_value, list) and current_value:
+                        display_value = f"已配置 {len(current_value)} 个"
+                    else:
+                        display_value = "[未配置]"
+                # --- 新增结束 ---
                 reply += f"{emoji} **{name}**: `{display_value}`\n"
-                # 显示闭关任务状态
+                
+                # --- 修改: 显示闭关和斗法任务状态 ---
+                job_id_to_check = None
                 if path == "cultivation.auto_enabled" and CULTIVATION_PLUGIN_LOADED and current_value:
-                    if format_local_time: # 检查函数是否导入成功
-                        try:
-                            context = get_global_context(); job = None
-                            if context and context.scheduler and context.scheduler.running:
-                                try: job = context.scheduler.get_job(CULTIVATION_JOB_ID)
-                                except JobLookupError: job = None
-                                except Exception as get_job_err: self.warning(f"获取闭关任务 ({CULTIVATION_JOB_ID}) 时出错: {get_job_err}"); job = None
-                            if job and job.next_run_time:
-                                next_run_local_str = format_local_time(job.next_run_time) or str(job.next_run_time)
-                                reply += f"    └─ 下次运行: {next_run_local_str}\n"
-                            elif job: reply += f"    └─ 状态: 等待执行\n"
-                            else: reply += f"    └─ 状态: 等待调度\n"
-                        except Exception as e: self.debug(f"检查闭关任务状态时出错: {e}"); reply += "    └─ 状态: 检查任务出错\n"
-                    else: reply += "    └─ 状态: (无法格式化时间)\n"
+                    job_id_to_check = CULTIVATION_JOB_ID
+                elif path == "auto_duel.enabled" and AUTO_DUEL_PLUGIN_LOADED and current_value:
+                    job_id_to_check = AUTO_DUEL_JOB_ID
+
+                if job_id_to_check and format_local_time: # 检查函数是否导入成功
+                    try:
+                        context = get_global_context(); job = None
+                        if context and context.scheduler and context.scheduler.running:
+                            try: job = context.scheduler.get_job(job_id_to_check)
+                            except JobLookupError: job = None
+                            except Exception as get_job_err: self.warning(f"获取任务 ({job_id_to_check}) 时出错: {get_job_err}"); job = None
+                        if job and job.next_run_time:
+                            next_run_local_str = format_local_time(job.next_run_time) or str(job.next_run_time)
+                            reply += f"    └─ 下次运行: {next_run_local_str}\n"
+                        elif job: reply += f"    └─ 状态: 等待执行\n"
+                        else: reply += f"    └─ 状态: 等待调度\n"
+                    except Exception as e: self.debug(f"检查任务 {job_id_to_check} 状态时出错: {e}"); reply += "    └─ 状态: 检查任务出错\n"
+                elif job_id_to_check: reply += "    └─ 状态: (无法格式化时间)\n"
+                # --- 修改结束 ---
 
             # 显示固定信息
             api_keys_count = len(self.config.get('gemini.api_keys', [])); gemini_emoji = "✨"
@@ -346,4 +389,3 @@ class Plugin(BasePlugin):
             self.warning(f"回复状态消息失败 ({e})，尝试直接发送...")
             try: return await tg_client.app.send_message(original_message.chat.id, status_text, link_preview_options=link_preview_options)
             except Exception as e2: self.error(f"直接发送状态消息也失败: {e2}"); return None
-

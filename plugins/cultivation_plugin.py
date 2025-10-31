@@ -18,7 +18,7 @@ REDIS_WAITING_KEY_PREFIX = "cultivation_waiting_msg_id:{}" # Redis 等待状态 
 REDIS_ERROR_NOTIFY_LOCK_KEY_FORMAT = "cultivation:error_notify_lock:{}" # Redis 错误通知锁 Key 格式
 # --- 修改结束 ---
 ERROR_NOTIFY_LOCK_TTL = 3600
-RESPONSE_KEYWORDS = ["【闭关成功】", "【闭关失败】", "灵气尚未平复"]
+RESPONSE_KEYWORDS = ["【闭关成功】", "【闭关失败】", "灵气尚未平复", "【走火入魔】"] # <-- 新增 "【走火入魔】"
 STARTUP_DELAY_SECONDS = 15
 
 async def _send_cultivation_command_to_queue():
@@ -553,4 +553,5 @@ class Plugin(BasePlugin):
          self.info("确保移除旧的闭关调度任务和 Redis 状态...")
          await self._stop_internal()
          self.info("旧任务和状态清理完毕。")
+
 
