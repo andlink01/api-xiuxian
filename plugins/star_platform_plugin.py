@@ -215,21 +215,21 @@ async def _check_star_platform_task():
         ready_plot_ids: List[str] = []
         abnormal_plot_ids: List[str] = [] # 星光黯淡 / 元磁紊乱
 
-        # 检查是否有地块处于“精华已成”或“异变”状态
-        has_ready_or_abnormal = False
+        # --- 优化: 状态集合 ---
+        COLLECTIBLE_STATUSES = {"精华已成", "可收集"}
+        ABNORMAL_STATUSES = {"星光黯淡", "元磁紊乱"}
+        # --- 优化结束 ---
+
         for plot_id_str in range(1, size + 1):
             plot_id = str(plot_id_str)
             plot_info = plots.get(plot_id)
             if plot_info and isinstance(plot_info, dict):
                  status = plot_info.get("status")
-                 if status == "精华已成":
+                 if status in COLLECTIBLE_STATUSES:
                      ready_plot_ids.append(plot_id)
-                     has_ready_or_abnormal = True
-                 elif status in ["星光黯淡", "元磁紊乱"]:
+                 elif status in ABNORMAL_STATUSES:
                      abnormal_plot_ids.append(plot_id)
-                     has_ready_or_abnormal = True
                  elif status == "凝聚中":
-                     # 记录凝聚中的信息，但不影响优先操作
                      star_name = plot_info.get("star_name")
                      start_time = plot_info.get("start_time")
                      duration = STAR_INFO.get(star_name, 0) if star_name else 0
@@ -275,8 +275,10 @@ async def _check_star_platform_task():
         for cmd in soothe_cmds:
              if cmd not in commands_to_send: commands_to_send.append(cmd)
 
-        # 3. 处理空闲 (牵引) - 只有在没有异变和收集操作时才执行牵引
-        if not has_ready_or_abnormal and empty_plot_ids:
+        # --- 修复: 移除 'if not has_ready_or_abnormal' ---
+        # 3. 处理空闲 (牵引) - 总是检查
+        if empty_plot_ids:
+        # --- 修复结束 ---
             attract_priority_list = config.get("star_platform.attract_priority", [])
             is_elder = sect_info.get("is_sect_elder", 0) or sect_info.get("is_grand_elder", 0)
             has_ztp = False
@@ -303,8 +305,10 @@ async def _check_star_platform_task():
                     break # 每次检查只尝试牵引一个优先级最高的
                 else:
                     task_logger.debug(f"跳过牵引 '{star_name}'：权限不足 (长老:{is_elder}, 掌天瓶:{has_ztp})")
-            commands_to_send.extend(attract_cmds)
-
+        
+        # --- 修复: 总是将 attract_cmds 附加到最后 ---
+        commands_to_send.extend(attract_cmds)
+        # --- 修复结束 ---
 
         # --- 执行指令序列 (逻辑不变) ---
         if commands_to_send:
@@ -604,3 +608,4 @@ class Plugin(BasePlugin):
             self.error(f"处理观星台游戏响应时出错: {e}", exc_info=True)
             await _clear_star_platform_state(redis_client, self._my_id, self.scheduler, release_lock=True)
             await self.context.event_bus.emit("trigger_character_sync_now")
+
